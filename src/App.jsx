@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { Auth, Pumps, Shifts, Payments, Analytics, Admin, checkBackend } from "./api.js";
 
 // ═══════════════════════════════════════════════════════════
 // DESIGN TOKENS
@@ -882,11 +883,18 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout})=>{
   const[showAddNozzle,setShowAddNozzle]=useState(null); // pumpId to add nozzle to
   const[nozzleF,setNozzleF]=useState({id:"",fuel:"Petrol",openReading:"",operator:"",status:"Active"});
 
-  const paySuccess=info=>{
-    const txn={id:`TXN-${Math.floor(9000+Math.random()*999)}`,ownerId:owner.id,plan:info.plan,billing:info.billing,amount:info.amount,base:info.base,gst:info.gst,credit:info.credit,date:todayS(),method:info.method,status:"Success",razorId:info.txnId};
+  const paySuccess=async info=>{
+    const txn={id:`TXN-${Math.floor(9000+Math.random()*999)}`,ownerId:owner.id,plan:info.plan,billing:info.billing,amount:info.amount,base:info.base,gst:info.gst,credit:info.credit,date:todayS(),method:info.method,status:"Success",razorId:info.txnId,planActivated:true};
     const upd={...owner,plan:info.plan,billing:info.billing,amountPaid:info.base,status:"Active",startDate:todayS(),endDate:addMo(todayS(),info.billing==="monthly"?1:12),daysUsed:0};
+    // Update local state immediately (optimistic)
     setDb(d=>({...d,transactions:[txn,...d.transactions],owners:d.owners.map(o=>o.id===owner.id?upd:o)}));
     setOwner(upd);setGw(null);flash("✓ "+info.plan+" plan activated!");setTab("billing");
+    // Sync to backend (non-blocking)
+    try{
+      if(info.razorpay_payment_id){
+        await Payments.verify(info.razorpay_order_id,info.razorpay_payment_id,info.razorpay_signature,info.txnId);
+      }
+    }catch(e){ console.warn("Payment sync to backend failed:",e.message); }
   };
 
   const addPump=()=>{
@@ -3236,14 +3244,18 @@ const MainLogin=({db,onLogin,onAdminLink})=>{
     {k:"operator",icon:"⛽",label:"Operator",color:C.green,desc:"Your shift — machine tests, nozzle readings & payment for assigned nozzles"},
   ];
   const DEMOS={owner:{e:"rajesh@sharma.com",p:"owner123"},manager:{e:"vikram@sharma.com",p:"mgr123"},operator:{e:"amit@sharma.com",p:"op123"}};
-  const login=()=>{
+  const login=async()=>{
     setErr("");setLoading(true);
-    setTimeout(()=>{
+    try{
+      const data=await Auth.login(email,pass,role);
+      onLogin(role,data.user);
+    }catch(apiErr){
+      // Fallback: local demo data (works offline)
       const src={owner:db.owners,manager:db.managers,operator:db.operators}[role];
       const user=src?.find(u=>u.email===email&&u.password===pass);
       if(user)onLogin(role,user);
-      else{setErr("Invalid credentials. Try the demo.");setLoading(false);}
-    },700);
+      else{setErr("Invalid credentials. Try the demo credentials.");setLoading(false);}
+    }
   };
   const rd=ROLES.find(r=>r.k===role);
   return(
@@ -3311,16 +3323,26 @@ const AdminLogin=({onLogin,onBack})=>{
   const[otp,setOtp]=useState("");
   const[err,setErr]=useState("");
   const[loading,setLoading]=useState(false);
-  const go=()=>{
+  const go=async()=>{
     setErr("");setLoading(true);
-    setTimeout(()=>{
+    try{
+      await Auth.adminLogin(pass);
+      setStep("otp");setLoading(false);
+    }catch(e){
+      // Fallback demo
       if(email==="admin@fuelos.in"&&pass==="admin2025"){setStep("otp");setLoading(false);}
       else{setErr("Invalid admin credentials");setLoading(false);}
-    },700);
+    }
   };
-  const verifyOtp=()=>{
-    if(otp==="123456"||otp.length===6){onLogin();}
-    else setErr("Invalid OTP");
+  const verifyOtp=async()=>{
+    try{
+      await Auth.adminVerify(otp);
+      onLogin();
+    }catch(e){
+      // Demo fallback
+      if(otp.length===6){onLogin();}
+      else setErr("Invalid OTP");
+    }
   };
   return(
     <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Mono',monospace"}}>
@@ -3359,11 +3381,36 @@ export default function App(){
   const[view,setView]=useState("main"); // main | admin
   const[role,setRole]=useState(null);   // owner | manager | operator | admin
   const[user,setUser]=useState(null);
-  const logout=()=>{setRole(null);setUser(null);setView("main");};
+  const[backendOk,setBackendOk]=useState(null); // null=checking, true=online, false=offline
 
-  if(view==="admin"&&!role)return <AdminLogin onLogin={()=>setRole("admin")} onBack={()=>setView("main")}/>;
+  // Check backend connection on mount
+  useEffect(()=>{
+    checkBackend().then(ok=>{
+      setBackendOk(ok);
+      if(ok) console.log("✓ FuelOS backend connected");
+      else   console.warn("⚠ Backend offline — running in demo mode");
+    });
+  },[]);
+
+  const logout=()=>{
+    Auth.logout(); // clear JWT token
+    setRole(null);setUser(null);setView("main");
+  };
+
+  // Backend status banner (shown on login screen only)
+  const BackendBadge=()=>backendOk===false
+    ?<div style={{position:"fixed",bottom:16,right:16,background:"rgba(251,191,36,.12)",border:"1px solid rgba(251,191,36,.3)",borderRadius:9,padding:"7px 13px",fontSize:10,color:"#fbbf24",zIndex:9999}}>
+       ⚠ Demo mode — backend offline. Data resets on refresh.
+     </div>
+    :backendOk===true
+    ?<div style={{position:"fixed",bottom:16,right:16,background:"rgba(0,229,179,.08)",border:"1px solid rgba(0,229,179,.25)",borderRadius:9,padding:"7px 13px",fontSize:10,color:"#00e5b3",zIndex:9999}}>
+       ✓ Connected to FuelOS backend
+     </div>
+    :null;
+
+  if(view==="admin"&&!role)return <>{BackendBadge&&<BackendBadge/>}<AdminLogin onLogin={()=>setRole("admin")} onBack={()=>setView("main")}/></>;
   if(role==="admin")return <AdminDash onLogout={logout} db={db} setDb={setDb}/>;
-  if(!role)return <MainLogin db={db} onLogin={(r,u)=>{setRole(r);setUser(u);}} onAdminLink={()=>setView("admin")}/>;
+  if(!role)return <>{BackendBadge&&<BackendBadge/>}<MainLogin db={db} onLogin={(r,u)=>{setRole(r);setUser(u);}} onAdminLink={()=>setView("admin")}/></>;
   if(role==="owner")return <OwnerDash owner={user} setOwner={u=>setUser(u)} db={db} setDb={setDb} onLogout={logout}/>;
   if(role==="manager")return <ManagerDash manager={user} db={db} setDb={setDb} onLogout={logout}/>;
   if(role==="operator")return <OperatorDash operator={user} db={db} setDb={setDb} onLogout={logout}/>;
