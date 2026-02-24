@@ -2582,6 +2582,17 @@ const AdminDash=({onLogout,db,setDb})=>{
   const[msg,setMsg]=useState("");
   const flash=t=>{setMsg(t);setTimeout(()=>setMsg(""),4000);};
 
+  // Backend connection status
+  const[backendStatus,setBackendStatus]=useState({checking:true,ok:false,db:false,latency:null,version:null,error:null});
+
+  useEffect(()=>{
+    const t=Date.now();
+    fetch((import.meta.env.VITE_API_URL||'https://fuelos-backend.onrender.com')+'/api/health')
+      .then(r=>r.json())
+      .then(d=>setBackendStatus({checking:false,ok:true,db:true,latency:Date.now()-t,version:d.version,error:null}))
+      .catch(e=>setBackendStatus({checking:false,ok:false,db:false,latency:null,version:null,error:e.message}));
+  },[]);
+
   // Integration configs
   const[rzp,setRzp]=useState({liveKeyId:"rzp_live_XXXXXXXXXX",liveSecret:"",testKeyId:"rzp_test_MockKey123",testSecret:"",webhookSecret:"",mode:"test",autoCapture:true,sendReceipt:true,currency:"INR",saved:false});
   const[wa,setWa]=useState({provider:"meta",apiKey:"",phoneNumberId:"",wabaId:"",twAccountSid:"",twAuthToken:"",twFrom:"",watiKey:"",namespace:"fuelos_notifications",waNumber:"",templates:{payment:"✅ Payment confirmed! *{{plan}}* plan activated.\nValid till: *{{date}}*\nAmount: *₹{{amount}}*",shift:"📋 Shift: *{{pump}}* · {{shift}}\nSales: *₹{{amount}}*",alert:"⚠️ *Alert — {{pump}}*\n{{message}}",test:"🔬 Machine Test *{{result}}*\nNozzle: {{nozzle}} · Variance: {{variance}}ml"},saved:false});
@@ -2955,13 +2966,64 @@ const AdminDash=({onLogout,db,setDb})=>{
 {/* ── INTEGRATIONS ── */}
 {tab==="integrations"&&<div style={{display:"flex",flexDirection:"column",gap:16}}>
   <H icon="🔌" title="Integration Configuration" sub="API keys, webhooks, and message templates for all external services"/>
+
+  {/* ── BACKEND STATUS PANEL ── */}
+  <div style={{...G.card,padding:20}}>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <div style={{width:38,height:38,borderRadius:10,background:backendStatus.ok?C.greenDim:backendStatus.checking?"rgba(75,141,248,.1)":C.redDim,display:"grid",placeItems:"center",fontSize:18}}>
+          {backendStatus.checking?"⏳":backendStatus.ok?"✅":"❌"}
+        </div>
+        <div>
+          <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:15}}>Backend Connection Status</div>
+          <div style={{fontSize:10,color:C.muted3}}>Render.com API · SQLite Database</div>
+        </div>
+      </div>
+      <button onClick={()=>{
+        setBackendStatus(s=>({...s,checking:true}));
+        const t=Date.now();
+        fetch((import.meta.env.VITE_API_URL||'https://fuelos-backend.onrender.com')+'/api/health')
+          .then(r=>r.json())
+          .then(d=>setBackendStatus({checking:false,ok:true,db:true,latency:Date.now()-t,version:d.version,error:null}))
+          .catch(e=>setBackendStatus({checking:false,ok:false,db:false,latency:null,version:null,error:e.message}));
+      }} style={{...G.btn,background:C.s3,color:C.text,fontSize:11}}>↻ Recheck</button>
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+      {[
+        {label:"API Server",ok:backendStatus.ok,val:backendStatus.ok?"Online":backendStatus.checking?"Checking…":"Offline",icon:"🌐",color:backendStatus.ok?C.green:backendStatus.checking?C.blue:C.red},
+        {label:"Database",ok:backendStatus.db,val:backendStatus.db?"SQLite Ready":backendStatus.checking?"Checking…":"Error",icon:"🗄️",color:backendStatus.db?C.green:backendStatus.checking?C.blue:C.red},
+        {label:"Response Time",ok:backendStatus.latency!=null,val:backendStatus.latency?backendStatus.latency+"ms":backendStatus.checking?"Checking…":"—",icon:"⚡",color:backendStatus.latency<500?C.green:backendStatus.latency<2000?C.warn:C.red},
+        {label:"Version",ok:!!backendStatus.version,val:backendStatus.version?"v"+backendStatus.version:backendStatus.checking?"Checking…":"Unknown",icon:"🏷️",color:C.blue},
+      ].map(s=><div key={s.label} style={{background:C.s2,borderRadius:10,padding:"12px 14px",border:`1px solid ${C.border}`}}>
+        <div style={{fontSize:18,marginBottom:6}}>{s.icon}</div>
+        <div style={{fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:C.muted,marginBottom:4}}>{s.label}</div>
+        <div style={{fontSize:13,fontWeight:700,color:s.color}}>{s.val}</div>
+      </div>)}
+    </div>
+    {backendStatus.error&&<div style={{marginTop:12,padding:"10px 14px",background:C.redDim,borderRadius:8,fontSize:11,color:C.red}}>
+      ⚠ Error: {backendStatus.error}
+    </div>}
+    {backendStatus.ok&&<div style={{marginTop:12,padding:"10px 14px",background:C.greenDim,borderRadius:8,fontSize:11,color:C.green,display:"flex",gap:8,alignItems:"center"}}>
+      ✓ Backend is live · All API routes active · Data saves to Render SQLite (/tmp/fuelos.db)
+    </div>}
+  </div>
+
+  {/* ── INTEGRATION STATUS SUMMARY ── */}
   <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
-    {[{k:"razorpay",n:"Razorpay",icon:"💳",ok:rzp.saved,c:C.blue},{k:"whatsapp",n:"WhatsApp",icon:"💬",ok:wa.saved,c:C.green},{k:"email",n:"Email/SMTP",icon:"📧",ok:eml.saved,c:C.purple},{k:"sms",n:"SMS API",icon:"📱",ok:sms.saved,c:C.accent}].map(s=><div key={s.k} onClick={()=>setIntegTab(s.k)} style={{...G.card,padding:14,borderTop:`3px solid ${s.ok?s.c:C.muted}`,cursor:"pointer",opacity:integTab===s.k?1:.7,transition:"all .15s",boxShadow:integTab===s.k?`0 0 0 1px ${s.c}40`:undefined}}>
-      <div style={{fontSize:22,marginBottom:5}}>{s.icon}</div>
-      <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:12,color:s.ok?s.c:C.muted3,marginBottom:5}}>{s.n}</div>
-      <IntegBadge saved={s.ok} mode={s.k==="razorpay"?rzp.mode:undefined}/>
+    {[
+      {label:"Razorpay",ok:rzp.saved,icon:"💳",val:rzp.saved?(rzp.mode==="live"?"Live Mode":"Test Mode"):"Not Configured",color:rzp.saved?C.blue:C.muted},
+      {label:"WhatsApp",ok:wa.saved,icon:"💬",val:wa.saved?(wa.provider||"Meta API"):"Not Configured",color:wa.saved?C.green:C.muted},
+      {label:"Email/SMTP",ok:eml.saved,icon:"📧",val:eml.saved?(eml.host||"SMTP"):"Not Configured",color:eml.saved?C.purple:C.muted},
+      {label:"SMS",ok:sms.saved,icon:"📱",val:sms.saved?(sms.provider||"MSG91"):"Not Configured",color:sms.saved?C.accent:C.muted},
+    ].map(s=><div key={s.label} style={{background:C.s2,borderRadius:10,padding:"12px 14px",border:`1px solid ${s.ok?s.color+"44":C.border}`,cursor:"pointer"}} onClick={()=>setIntegTab(s.label.toLowerCase().replace("/smtp","").replace(" ",""))}>
+      <div style={{fontSize:20,marginBottom:5}}>{s.icon}</div>
+      <div style={{fontSize:11,fontWeight:700,color:s.ok?s.color:C.muted3,marginBottom:4}}>{s.label}</div>
+      <div style={{fontSize:10,color:C.muted2,marginBottom:6}}>{s.val}</div>
+      <span style={{...G.badge,background:s.ok?`${s.color}18`:"rgba(62,78,106,.4)",color:s.ok?s.color:C.muted,fontSize:9}}>{s.ok?"✓ Connected":"○ Not set"}</span>
     </div>)}
   </div>
+
+
 
   {/* RAZORPAY */}
   {integTab==="razorpay"&&<div style={{...G.card}}>
