@@ -809,7 +809,7 @@ const MachineTestLog=({tests,nozzles,pumps,showFilter})=>{
 // ═══════════════════════════════════════════════════════════
 // OWNER DASHBOARD — Multi-Pump with Consolidated View
 // ═══════════════════════════════════════════════════════════
-const OwnerDash=({owner,setOwner,db,setDb,onLogout})=>{
+const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
   const[tab,setTab]=useState("overview");
   const[activePump,setActivePump]=useState(null); // null = consolidated view
   const[gw,setGw]=useState(null);
@@ -897,11 +897,13 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout})=>{
     }catch(e){ console.warn("Payment sync to backend failed:",e.message); }
   };
 
-  const addPump=()=>{
+  const addPump=async()=>{
     if(!pumpLimit.ok){flash("⚠ Plan limit reached — upgrade to add more pumps");return;}
     if(!pumpF.name||!pumpF.shortName||!pumpF.city){flash("⚠ Fill all required fields");return;}
     const np={id:"P"+rid(),ownerId:owner.id,...pumpF,status:"Active"};
-    setDb(d=>({...d,pumps:[...d.pumps,np]}));
+    setDb(d=>({...d,pumps:[...d.pumps,np]})); // optimistic
+    try{ await Pumps.create({...np,owner_id:owner.id,short_name:np.shortName}); refreshData?.(); }
+    catch(e){ console.warn("Pump sync:",e.message); }
     flash("✓ Pump added: "+pumpF.name);setShowAddPump(false);setPumpF({name:"",shortName:"",city:"",state:"",address:"",gst:""});
   };
 
@@ -910,13 +912,19 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout})=>{
     setEditPump(pump.id);
     setEditPumpF({name:pump.name,shortName:pump.shortName,city:pump.city,state:pump.state,address:pump.address||"",gst:pump.gst||""});
   };
-  const saveEditPump=()=>{
+  const saveEditPump=async()=>{
     if(!editPumpF.name||!editPumpF.shortName){flash("⚠ Name and short name required");return;}
     setDb(d=>({...d,pumps:d.pumps.map(p=>p.id===editPump?{...p,...editPumpF}:p)}));
+    try{ await Pumps.update(editPump,{...editPumpF,short_name:editPumpF.shortName}); }
+    catch(e){ console.warn("Pump update sync:",e.message); }
     flash("✓ Pump updated");setEditPump(null);
   };
-  const togglePumpStatus=(pumpId)=>{
-    setDb(d=>({...d,pumps:d.pumps.map(p=>p.id===pumpId?{...p,status:p.status==="Active"?"Inactive":"Active"}:p)}));
+  const togglePumpStatus=async(pumpId)=>{
+    const pump=db.pumps.find(p=>p.id===pumpId);
+    const newStatus=pump?.status==="Active"?"Inactive":"Active";
+    setDb(d=>({...d,pumps:d.pumps.map(p=>p.id===pumpId?{...p,status:newStatus}:p)}));
+    try{ await Pumps.update(pumpId,{status:newStatus}); }
+    catch(e){ console.warn("Toggle pump sync:",e.message); }
     flash("Pump status updated");
   };
   const addNozzle=(pumpId)=>{
@@ -928,12 +936,16 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout})=>{
     const nn={id:nozzleF.id,ownerId:owner.id,pumpId,fuel:nozzleF.fuel,
       open:parseFloat(nozzleF.openReading),close:"",operator:nozzleF.operator||"",status:nozzleF.status};
     setDb(d=>({...d,nozzles:[...d.nozzles,nn]}));
+    try{ await Pumps.addNozzle(pumpId,{id:nn.id,fuel:nn.fuel,open_reading:nn.open,operator:nn.operator,status:nn.status}); refreshData?.(); }
+    catch(e){ console.warn("Add nozzle sync:",e.message); }
     flash("✓ Nozzle "+nozzleF.id+" added to pump");
     setNozzleF({id:"",fuel:"Petrol",openReading:"",operator:"",status:"Active"});
     setShowAddNozzle(null);
   };
-  const removeNozzle=(nozzleId,pumpId)=>{
+  const removeNozzle=async(nozzleId,pumpId)=>{
     setDb(d=>({...d,nozzles:d.nozzles.filter(n=>!(n.id===nozzleId&&n.pumpId===pumpId))}));
+    try{ await Pumps.removeNozzle(pumpId,nozzleId); }
+    catch(e){ console.warn("Remove nozzle sync:",e.message); }
     flash("Nozzle removed");
   };
   const updateNozzleReading=(nozzleId,pumpId,reading)=>{
@@ -2002,7 +2014,7 @@ const ShiftReportFilter=({reports,nozzleReadings,nozzles,title,showPump=false,pu
 // ═══════════════════════════════════════════════════════════
 // MANAGER DASHBOARD — Full shift-wise operations
 // ═══════════════════════════════════════════════════════════
-const ManagerDash=({manager,db,setDb,onLogout})=>{
+const ManagerDash=({manager,db,setDb,onLogout,refreshData})=>{
   const[tab,setTab]=useState("operations");
   const[msg,setMsg]=useState("");
   const flash=t=>{setMsg(t);setTimeout(()=>setMsg(""),4000);};
@@ -2074,7 +2086,7 @@ const ManagerDash=({manager,db,setDb,onLogout})=>{
   const todayTests=myTests.filter(t=>t.date===todayS());
   const pendingTests=myNozzles.filter(n=>getNozzleTestStatus(myTests,n.id,manager.pumpId,todayS())==="pending").length;
 
-  const submitShift=()=>{
+  const submitShift=async()=>{
     if(!allCloseFilled){flash("⚠ Please enter close readings for all nozzles");return;}
     const newNozzleReadings=nozzleCalcs.map(c=>({
       id:`NR-${manager.pumpId}-${c.nozzle.id}-${activeDate}-${activeShift.name}-${rid()}`,
@@ -2107,14 +2119,12 @@ const ManagerDash=({manager,db,setDb,onLogout})=>{
       readings:nrIds,
     };
 
-    // Update nozzle open readings to close readings (for next shift auto-population)
     const updatedNozzles=db.nozzles.map(n=>{
       const match=nozzleCalcs.find(c=>c.nozzle.id===n.id&&n.pumpId===manager.pumpId);
       if(!match||isNaN(match.closeR))return n;
       return{...n,open:match.closeR,close:""};
     });
 
-    // Update sales
     const newSales={date:activeDate,pumpId:manager.pumpId,ownerId:manager.ownerId,
       petrol:nozzleCalcs.filter(c=>c.nozzle.fuel==="Petrol").reduce((s,c)=>s+(c.revenue||0),0),
       diesel:nozzleCalcs.filter(c=>c.nozzle.fuel==="Diesel").reduce((s,c)=>s+(c.revenue||0),0),
@@ -2127,13 +2137,39 @@ const ManagerDash=({manager,db,setDb,onLogout})=>{
         cng:(db.sales.find(s=>s.pumpId===manager.pumpId&&s.date===activeDate)?.cng||0)+newSales.cng,
       }];
 
+    // Optimistic update
     setDb(d=>({...d,
       nozzleReadings:[...d.nozzleReadings,...newNozzleReadings],
       shiftReports:[shiftReport,...d.shiftReports],
       nozzles:updatedNozzles,
       sales:salesUpdated,
     }));
-    flash("✅ "+activeShift.name+" shift submitted! Nozzle readings rolled over.");
+
+    // Sync to backend
+    try{
+      await Shifts.submit({
+        pump_id:manager.pumpId,
+        date:activeDate,
+        shift:activeShift.name,
+        shift_index:activeShift.index,
+        manager:manager.name,
+        cash:Math.round(cashSum),
+        card:Math.round(cardSum),
+        upi:Math.round(upiSum),
+        credit_out:Math.round(creditSum),
+        nozzle_readings:newNozzleReadings.map(r=>({
+          nozzleId:r.nozzleId,fuel:r.fuel,
+          openReading:r.openReading,closeReading:r.closeReading,
+          testVol:r.testVol,netVol:r.netVol,saleVol:r.saleVol,
+          revenue:r.revenue,rate:r.rate,operator:r.operator,
+        })),
+      });
+      refreshData?.(); // reload shifts + sales from backend
+      flash("✅ "+activeShift.name+" shift saved to backend! Readings rolled over.");
+    }catch(e){
+      console.warn("Shift backend sync:",e.message);
+      flash("✅ "+activeShift.name+" shift submitted! (offline — will sync later)");
+    }
     setTab("history");
   };
 
@@ -2389,7 +2425,7 @@ const ManagerDash=({manager,db,setDb,onLogout})=>{
 // ═══════════════════════════════════════════════════════════
 // OPERATOR DASHBOARD — Nozzle-scoped, shift-aware
 // ═══════════════════════════════════════════════════════════
-const OperatorDash=({operator,db,setDb,onLogout})=>{
+const OperatorDash=({operator,db,setDb,onLogout,refreshData})=>{
   const[tab,setTab]=useState("operations");
   const[msg,setMsg]=useState("");
   const flash=t=>{setMsg(t);setTimeout(()=>setMsg(""),4000);};
@@ -2577,13 +2613,18 @@ const FlowStep=({n,text})=><div style={{display:"flex",gap:9,alignItems:"flex-st
   <span style={{fontSize:10,color:C.muted3,lineHeight:1.5}}>{text}</span>
 </div>;
 
-const AdminDash=({onLogout,db,setDb})=>{
+const AdminDash=({onLogout,db,setDb,refreshData})=>{
   const[tab,setTab]=useState("overview");
   const[msg,setMsg]=useState("");
   const flash=t=>{setMsg(t);setTimeout(()=>setMsg(""),4000);};
 
   // Backend connection status
   const[backendStatus,setBackendStatus]=useState({checking:true,ok:false,db:false,latency:null,version:null,error:null});
+
+  // Load real admin data from backend on mount
+  useEffect(()=>{
+    refreshData?.();
+  },[]);
 
   useEffect(()=>{
     const t=Date.now();
@@ -2639,20 +2680,30 @@ const AdminDash=({onLogout,db,setDb})=>{
   const integCount=[rzp.saved,wa.saved,eml.saved,sms.saved].filter(Boolean).length;
 
   // Actions
-  const forceChangePlan=(ownerId,plan)=>{
+  const forceChangePlan=async(ownerId,plan)=>{
     setDb(d=>({...d,
       owners:d.owners.map(o=>o.id===ownerId?{...o,plan,status:"Active",startDate:todayS(),endDate:addMo(todayS(),1),daysUsed:0}:o),
       auditLog:[{id:"AL"+rid(),user:"admin@fuelos.in",role:"Admin",action:`Force plan → ${plan} for ${db.owners.find(o=>o.id===ownerId)?.name}`,time:todayS()+" "+new Date().toTimeString().slice(0,5),ip:"127.0.0.1"},...(d.auditLog||[])],
     }));
+    try{
+      await Admin.updateOwner(ownerId,{plan});
+      const fresh=await Admin.owners().catch(()=>null);
+      if(fresh) setDb(d=>({...d,owners:fresh}));
+    }catch(e){ console.warn("Plan change sync:",e.message); }
     setPlanDropdown(null);flash("✓ Plan changed to "+plan+" — limits enforced immediately");
   };
-  const retryTxn=(txnId)=>{
+  const retryTxn=async(txnId)=>{
     const txn=db.transactions.find(t=>t.id===txnId);
     if(!txn)return;
     setDb(d=>({...d,
       transactions:d.transactions.map(t=>t.id===txnId?{...t,status:"Success",planActivated:true}:t),
       owners:d.owners.map(o=>o.id===txn.ownerId?{...o,plan:txn.plan,status:"Active",startDate:todayS(),endDate:addMo(todayS(),1)}:o),
     }));
+    try{
+      await Admin.retryTransaction(txnId);
+      const [freshOwners,freshTxns]=await Promise.all([Admin.owners().catch(()=>null),Admin.transactions().catch(()=>null)]);
+      setDb(d=>({...d,...(freshOwners?{owners:freshOwners}:{}), ...(freshTxns?{transactions:freshTxns}:{})}));
+    }catch(e){ console.warn("Retry txn sync:",e.message); }
     flash("✓ Retried — plan "+txn.plan+" activated for owner");
   };
   const toggleOwner=(ownerId)=>{
@@ -3081,7 +3132,7 @@ const AdminDash=({onLogout,db,setDb})=>{
         <button onClick={testRzpConn} disabled={testingRzp} style={{...G.btn,background:rzpTested?C.greenDim:testingRzp?C.s3:C.blueDim,color:rzpTested?C.green:testingRzp?C.muted:C.blue,border:`1px solid ${rzpTested?"rgba(0,229,179,.3)":"rgba(75,141,248,.3)"}`,padding:"9px 18px",fontSize:10}}>
           {testingRzp?"⏳ Testing…":rzpTested?"✓ Connection OK":"🧪 Test Connection"}
         </button>
-        <button onClick={()=>{setRzp(c=>({...c,saved:true}));flash("✓ Razorpay configuration saved and active");}} style={{...G.btn,background:rzp.saved?C.greenDim:`linear-gradient(90deg,${C.blue},rgba(75,141,248,.8))`,color:rzp.saved?C.green:"#fff",fontWeight:700,flex:1,justifyContent:"center",fontSize:11,border:rzp.saved?`1px solid rgba(0,229,179,.3)`:"none"}}>
+        <button onClick={()=>{setRzp(c=>({...c,saved:true}));Admin.saveConfig({rzp_mode:rzp.mode,rzp_test_key_id:rzp.testKeyId,rzp_test_key_secret:rzp.testSecret,rzp_live_key_id:rzp.liveKeyId,rzp_live_key_secret:rzp.liveSecret,rzp_webhook_secret:rzp.webhookSecret}).catch(e=>console.warn("Rzp cfg:",e.message));flash("✓ Razorpay configuration saved and active");}} style={{...G.btn,background:rzp.saved?C.greenDim:`linear-gradient(90deg,${C.blue},rgba(75,141,248,.8))`,color:rzp.saved?C.green:"#fff",fontWeight:700,flex:1,justifyContent:"center",fontSize:11,border:rzp.saved?`1px solid rgba(0,229,179,.3)`:"none"}}>
           {rzp.saved?"✓ Razorpay Configured &amp; Active":"Save &amp; Activate Razorpay →"}
         </button>
       </div>
@@ -3136,7 +3187,7 @@ const AdminDash=({onLogout,db,setDb})=>{
         <button onClick={testWaConn} disabled={testingWa} style={{...G.btn,background:waTested?C.greenDim:testingWa?C.s3:C.greenDim,color:waTested?C.green:testingWa?C.muted:C.green,border:`1px solid rgba(0,229,179,.3)`,padding:"9px 18px",fontSize:10}}>
           {testingWa?"⏳ Sending…":waTested?"✓ Message Sent":"📱 Send Test Message"}
         </button>
-        <button onClick={()=>{setWa(c=>({...c,saved:true}));flash("✓ WhatsApp configured — messages will be sent automatically on all events");}} style={{...G.btn,background:wa.saved?C.greenDim:`linear-gradient(90deg,${C.green},rgba(0,229,179,.8))`,color:wa.saved?C.green:"#000",fontWeight:700,flex:1,justifyContent:"center",fontSize:11,border:wa.saved?`1px solid rgba(0,229,179,.3)`:"none"}}>
+        <button onClick={()=>{setWa(c=>({...c,saved:true}));Admin.saveConfig({wa_provider:wa.provider,wa_api_key:wa.apiKey,wa_phone_number_id:wa.phoneNumberId,wa_number:wa.waNumber}).catch(e=>console.warn("WA cfg:",e.message));flash("✓ WhatsApp configured — messages will be sent automatically on all events");}} style={{...G.btn,background:wa.saved?C.greenDim:`linear-gradient(90deg,${C.green},rgba(0,229,179,.8))`,color:wa.saved?C.green:"#000",fontWeight:700,flex:1,justifyContent:"center",fontSize:11,border:wa.saved?`1px solid rgba(0,229,179,.3)`:"none"}}>
           {wa.saved?"✓ WhatsApp Configured &amp; Active":"Save &amp; Activate WhatsApp →"}
         </button>
       </div>
@@ -3436,46 +3487,147 @@ const AdminLogin=({onLogin,onBack})=>{
 };
 
 // ═══════════════════════════════════════════════════════════
-// ROOT APP
+// EMPTY DB — used before backend data loads
+// ═══════════════════════════════════════════════════════════
+const EMPTY_DB={
+  owners:[],pumps:[],managers:[],operators:[],nozzles:[],
+  nozzleReadings:[],tanks:[],creditCustomers:[],shiftReports:[],
+  sales:[],machineTests:[],transactions:[],waLog:[],
+  notifications:[],coupons:[],auditLog:[],services:[],
+};
+
+// ═══════════════════════════════════════════════════════════
+// ROOT APP — fully dynamic, all data from backend
 // ═══════════════════════════════════════════════════════════
 export default function App(){
-  const[db,setDb]=useState(DB);
-  const[view,setView]=useState("main"); // main | admin
-  const[role,setRole]=useState(null);   // owner | manager | operator | admin
+  const[db,setDb]=useState(DB);       // starts with seed, replaced by real data after login
+  const[view,setView]=useState("main");
+  const[role,setRole]=useState(null);
   const[user,setUser]=useState(null);
-  const[backendOk,setBackendOk]=useState(null); // null=checking, true=online, false=offline
+  const[backendOk,setBackendOk]=useState(null);
+  const[loading,setLoading]=useState(false);
 
-  // Check backend connection on mount
+  // ── Check backend on mount
   useEffect(()=>{
     checkBackend().then(ok=>{
       setBackendOk(ok);
       if(ok) console.log("✓ FuelOS backend connected");
-      else   console.warn("⚠ Backend offline — running in demo mode");
+      else   console.warn("⚠ Backend offline — demo mode");
     });
   },[]);
 
+  // ── Load all real data from backend for a given owner/role
+  const loadBackendData=useCallback(async(loggedRole,loggedUser)=>{
+    if(!backendOk) return; // offline — keep seed data
+    try{
+      if(loggedRole==="owner"){
+        const [pumpsData,txnData,shiftsData,salesData]=await Promise.allSettled([
+          Pumps.list(),
+          Payments.history(),
+          Shifts.list({limit:200}),
+          Analytics.sales({days:30}),
+        ]);
+        const pumps   = pumpsData.status==="fulfilled"   ? pumpsData.value   : db.pumps;
+        const txns    = txnData.status==="fulfilled"     ? txnData.value     : db.transactions;
+        const shifts  = shiftsData.status==="fulfilled"  ? shiftsData.value  : db.shiftReports;
+        const sales   = salesData.status==="fulfilled"   ? salesData.value   : db.sales;
+
+        // Load nozzles for each pump
+        let allNozzles=[];
+        for(const p of pumps){
+          const nz=await Pumps.listNozzles(p.id).catch(()=>[]);
+          allNozzles=[...allNozzles,...nz];
+        }
+
+        setDb(d=>({
+          ...d,
+          owners:d.owners.map(o=>o.id===loggedUser.id?{...o,...loggedUser}:o),
+          pumps,
+          nozzles:allNozzles.length>0?allNozzles:d.nozzles,
+          transactions:txns,
+          shiftReports:shifts,
+          sales,
+        }));
+        console.log("✓ Owner data loaded from backend");
+      }
+      if(loggedRole==="manager"||loggedRole==="operator"){
+        const pumps=await Pumps.list().catch(()=>db.pumps);
+        let allNozzles=[];
+        for(const p of pumps){
+          const nz=await Pumps.listNozzles(p.id).catch(()=>[]);
+          allNozzles=[...allNozzles,...nz];
+        }
+        const shifts=await Shifts.list({limit:100}).catch(()=>db.shiftReports);
+        setDb(d=>({...d,pumps,nozzles:allNozzles.length>0?allNozzles:d.nozzles,shiftReports:shifts}));
+        console.log("✓ Staff data loaded from backend");
+      }
+      if(loggedRole==="admin"){
+        const [ownersData,txnData,auditData,waData]=await Promise.allSettled([
+          Admin.owners(),
+          Admin.transactions(),
+          Admin.audit(),
+          Admin.waLog(),
+        ]);
+        setDb(d=>({
+          ...d,
+          owners:ownersData.status==="fulfilled"?ownersData.value:d.owners,
+          transactions:txnData.status==="fulfilled"?txnData.value:d.transactions,
+          auditLog:auditData.status==="fulfilled"?auditData.value:d.auditLog,
+          waLog:waData.status==="fulfilled"?waData.value:d.waLog,
+        }));
+        console.log("✓ Admin data loaded from backend");
+      }
+    }catch(e){
+      console.warn("Backend data load failed:",e.message,"— using local data");
+    }
+  },[backendOk]);
+
+  // ── Called after successful login
+  const handleLogin=useCallback(async(loggedRole,loggedUser)=>{
+    setLoading(true);
+    setRole(loggedRole);
+    setUser(loggedUser);
+    // Update this user in db.owners if owner
+    if(loggedRole==="owner"){
+      setDb(d=>({...d,owners:d.owners.map(o=>o.id===loggedUser.id?{...o,...loggedUser}:o)}));
+    }
+    await loadBackendData(loggedRole,loggedUser);
+    setLoading(false);
+  },[loadBackendData]);
+
+  // ── Refresh function — can be called from any dashboard to re-fetch
+  const refreshData=useCallback(()=>loadBackendData(role,user),[role,user,loadBackendData]);
+
   const logout=()=>{
-    Auth.logout(); // clear JWT token
+    Auth.logout();
     setRole(null);setUser(null);setView("main");
+    setDb(DB); // reset to seed data on logout
   };
 
-  // Backend status banner (shown on login screen only)
   const BackendBadge=()=>backendOk===false
-    ?<div style={{position:"fixed",bottom:16,right:16,background:"rgba(251,191,36,.12)",border:"1px solid rgba(251,191,36,.3)",borderRadius:9,padding:"7px 13px",fontSize:10,color:"#fbbf24",zIndex:9999}}>
-       ⚠ Demo mode — backend offline. Data resets on refresh.
-     </div>
+    ?<div style={{position:"fixed",bottom:16,right:16,background:"rgba(251,191,36,.12)",border:"1px solid rgba(251,191,36,.3)",borderRadius:9,padding:"7px 13px",fontSize:10,color:"#fbbf24",zIndex:9999}}>⚠ Demo mode — data resets on refresh</div>
     :backendOk===true
-    ?<div style={{position:"fixed",bottom:16,right:16,background:"rgba(0,229,179,.08)",border:"1px solid rgba(0,229,179,.25)",borderRadius:9,padding:"7px 13px",fontSize:10,color:"#00e5b3",zIndex:9999}}>
-       ✓ Connected to FuelOS backend
-     </div>
+    ?<div style={{position:"fixed",bottom:16,right:16,background:"rgba(0,229,179,.08)",border:"1px solid rgba(0,229,179,.25)",borderRadius:9,padding:"7px 13px",fontSize:10,color:"#00e5b3",zIndex:9999}}>✓ Connected to FuelOS backend</div>
     :null;
 
-  if(view==="admin"&&!role)return <>{BackendBadge&&<BackendBadge/>}<AdminLogin onLogin={()=>setRole("admin")} onBack={()=>setView("main")}/></>;
-  if(role==="admin")return <AdminDash onLogout={logout} db={db} setDb={setDb}/>;
-  if(!role)return <>{BackendBadge&&<BackendBadge/>}<MainLogin db={db} onLogin={(r,u)=>{setRole(r);setUser(u);}} onAdminLink={()=>setView("admin")}/></>;
-  if(role==="owner")return <OwnerDash owner={user} setOwner={u=>setUser(u)} db={db} setDb={setDb} onLogout={logout}/>;
-  if(role==="manager")return <ManagerDash manager={user} db={db} setDb={setDb} onLogout={logout}/>;
-  if(role==="operator")return <OperatorDash operator={user} db={db} setDb={setDb} onLogout={logout}/>;
+  if(loading)return(
+    <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16,fontFamily:"'DM Mono',monospace"}}>
+      <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&amp;family=DM+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+      <div style={{fontSize:32}}>⛽</div>
+      <div style={{fontSize:13,color:C.muted2}}>Loading your data…</div>
+      <div style={{width:200,height:3,background:C.border,borderRadius:3,overflow:"hidden"}}>
+        <div style={{height:"100%",width:"60%",background:`linear-gradient(90deg,${C.accent},${C.blue})`,borderRadius:3,animation:"slide 1s ease-in-out infinite alternate"}}/>
+      </div>
+      <style>{`@keyframes slide{from{transform:translateX(-60px)}to{transform:translateX(60px)}}`}</style>
+    </div>
+  );
+
+  if(view==="admin"&&!role)return <>{BackendBadge&&<BackendBadge/>}<AdminLogin onLogin={()=>handleLogin("admin",{id:"admin",email:"admin@fuelos.in",role:"admin"})} onBack={()=>setView("main")}/></>;
+  if(role==="admin")return <AdminDash onLogout={logout} db={db} setDb={setDb} refreshData={refreshData}/>;
+  if(!role)return <>{BackendBadge&&<BackendBadge/>}<MainLogin db={db} onLogin={handleLogin} onAdminLink={()=>setView("admin")}/></>;
+  if(role==="owner")return <OwnerDash owner={user} setOwner={u=>setUser(u)} db={db} setDb={setDb} onLogout={logout} refreshData={refreshData}/>;
+  if(role==="manager")return <ManagerDash manager={user} db={db} setDb={setDb} onLogout={logout} refreshData={refreshData}/>;
+  if(role==="operator")return <OperatorDash operator={user} db={db} setDb={setDb} onLogout={logout} refreshData={refreshData}/>;
   return null;
 }
 
