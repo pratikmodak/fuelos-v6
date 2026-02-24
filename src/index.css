@@ -1,8 +1,76 @@
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: #05060f; color: #e8edf5; overflow-x: hidden; }
-::-webkit-scrollbar { width: 6px; height: 6px; }
+/* FuelOS v8 — Global Styles */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background: #05060f;
+  color: #e8edf5;
+  overflow-x: hidden;
+  font-family: 'DM Mono', 'Courier New', monospace;
+  min-height: 100vh;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: #090b18; }
 ::-webkit-scrollbar-thumb { background: #1c2540; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #243050; }
-input, select, textarea { color-scheme: dark; }
+
+/* Form elements */
+input, select, textarea {
+  color-scheme: dark;
+  font-family: 'DM Mono', monospace;
+}
+
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #e8edf5;
+  -webkit-box-shadow: 0 0 0px 1000px #0e1120 inset;
+  transition: background-color 5000s ease-in-out 0s;
+}
+
+/* Interactions */
+button { font-family: 'DM Mono', monospace; }
 button:active { transform: scale(0.97); }
+button:disabled { cursor: not-allowed !important; }
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(-12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Print styles for PDF export */
+@media print {
+  body { background: #fff; color: #111; }
+}
+
+/* Selection */
+::selection {
+  background: rgba(75, 141, 248, 0.3);
+  color: #e8edf5;
+}

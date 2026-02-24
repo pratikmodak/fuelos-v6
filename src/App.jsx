@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
-import { Auth, Pumps, Shifts, Payments, Analytics, Admin, checkBackend } from "./api.js";
 
 // ═══════════════════════════════════════════════════════════
 // DESIGN TOKENS
@@ -229,7 +228,21 @@ const DB={
     {id:"OP6",ownerId:"O3",pumpId:"P5",name:"Raj Sharma",email:"raj@krishna.com",password:"op444",phone:"9822000006",shift:"Morning",nozzles:["N-01","N-02"],present:true,salary:16000},
   ],
   nozzles:NOZZLES_CURRENT,
-  nozzleReadings:NOZZLE_READINGS_HISTORY,  // ← NEW: full per-shift reading history
+  nozzleReadings:NOZZLE_READINGS_HISTORY,
+  creditTxns:[
+    {id:"CTX001",customerId:"CC1",type:"sale",amount:8500,desc:"Diesel fill — 94.8L",date:"2025-02-20",time:"09:14"},
+    {id:"CTX002",customerId:"CC1",type:"payment",amount:15000,desc:"Cash payment",date:"2025-02-21",time:"11:30"},
+    {id:"CTX003",customerId:"CC2",type:"sale",amount:12300,desc:"Petrol + Diesel",date:"2025-02-22",time:"14:05"},
+    {id:"CTX004",customerId:"CC3",type:"sale",amount:5600,desc:"Petrol fill",date:"2025-02-23",time:"08:22"},
+    {id:"CTX005",customerId:"CC3",type:"payment",amount:5000,desc:"UPI transfer",date:"2025-02-23",time:"18:00"},
+  ],
+  indents:[
+    {id:"IND-1001",ownerId:"O1",pumpId:"P1",tankId:"T1",fuel:"Diesel",qty:5000,supplier:"Bharat Petroleum",deliveryDate:"2025-02-25",notes:"Urgent — stock critical",status:"Ordered",orderedAt:"2025-02-24"},
+    {id:"IND-1002",ownerId:"O1",pumpId:"P2",tankId:"T3",fuel:"Petrol",qty:8000,supplier:"IOC Distributor",deliveryDate:"2025-02-26",notes:"",status:"Dispatched",orderedAt:"2025-02-22"},
+    {id:"IND-1003",ownerId:"O1",pumpId:"P3",tankId:"T5",fuel:"CNG",qty:2000,supplier:"IGL Supplies",deliveryDate:"2025-02-20",notes:"",status:"Delivered",orderedAt:"2025-02-19"},
+  ],
+  shiftAuditLog:[],
+  fuelRates:{Petrol:96.72,Diesel:89.62,CNG:94.00},  // ← NEW: full per-shift reading history
   tanks:[
     {id:"T1",ownerId:"O1",pumpId:"P1",fuel:"Petrol",capacity:20000,stock:14200,dip:142.0,updated:seedDate(0),alertAt:3000},
     {id:"T2",ownerId:"O1",pumpId:"P1",fuel:"Diesel",capacity:15000,stock:2400,dip:48.0,updated:seedDate(0),alertAt:2000},
@@ -807,12 +820,689 @@ const MachineTestLog=({tests,nozzles,pumps,showFilter})=>{
 };
 
 // ═══════════════════════════════════════════════════════════
+// ⚡ NEW v7 FEATURES — Fuel Price Manager, Indent System,
+//    Advanced Analytics, PDF Export, Credit Full CRUD,
+//    Shift Audit, Push Notification Centre, Razorpay live flow
+// ═══════════════════════════════════════════════════════════
+
+// ── Fuel Price Manager Component
+const FuelPriceManager=({db,setDb,ownerId,flash})=>{
+  const[prices,setPrices]=useState({...FUEL.rates});
+  const[pumpPrices,setPumpPrices]=useState({});
+  const[mode,setMode]=useState("global"); // global | per-pump
+  const myPumps=db.pumps.filter(p=>p.ownerId===ownerId);
+  const save=()=>{
+    // Update global rates in DB
+    setDb(d=>({...d,fuelRates:{...d.fuelRates,...prices}}));
+    flash("✓ Fuel prices updated — effective from next shift");
+  };
+  return <div style={{display:"flex",flexDirection:"column",gap:15}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <div><div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:800}}>⛽ Fuel Price Manager</div><div style={{fontSize:11,color:C.muted3,marginTop:2}}>Set petrol, diesel and CNG rates per pump or globally</div></div>
+      <div style={{display:"flex",gap:8}}>
+        {["global","per-pump"].map(m=><button key={m} onClick={()=>setMode(m)} style={{...G.btn,background:mode===m?C.accent:C.s2,color:mode===m?"#000":C.muted2,border:`1px solid ${mode===m?C.accent:C.border}`}}>{m==="global"?"🌍 Global":"⛽ Per Pump"}</button>)}
+      </div>
+    </div>
+    {/* Live rate cards */}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+      {["Petrol","Diesel","CNG"].map(f=><div key={f} style={{...G.card,padding:18,borderTop:`3px solid ${FUEL.colors[f]}`}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <span style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13,color:FUEL.colors[f]}}>{f}</span>
+          <span style={{...G.badge,background:FUEL.colors[f]+"18",color:FUEL.colors[f]}}>{FUEL.hsn[f]}</span>
+        </div>
+        <div style={{fontSize:28,fontWeight:800,fontFamily:"'Syne',sans-serif",color:C.text,marginBottom:6}}>₹{prices[f]}</div>
+        <div style={{fontSize:9,color:C.muted3,marginBottom:10}}>per litre{f==="CNG"?" (kg)":""}</div>
+        <input type="number" step="0.01" value={prices[f]} onChange={e=>setPrices(p=>({...p,[f]:parseFloat(e.target.value)||0}))} style={{...G.input,fontSize:14,fontWeight:700,textAlign:"center",padding:"8px 12px"}}/>
+      </div>)}
+    </div>
+    {mode==="per-pump"&&<div style={G.card}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13}}>Per-Pump Rate Override</div>
+      <div style={{padding:16,display:"flex",flexDirection:"column",gap:10}}>
+        {myPumps.map(p=><div key={p.id} style={{background:C.s2,borderRadius:10,padding:14}}>
+          <div style={{fontWeight:700,marginBottom:10,color:C.muted3,fontSize:11}}>{p.name}</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+            {["Petrol","Diesel","CNG"].map(f=><div key={f}>
+              <label style={{...G.label,color:FUEL.colors[f]}}>{f}</label>
+              <input type="number" step="0.01" defaultValue={prices[f]} onChange={e=>setPumpPrices(prev=>({...prev,[p.id+f]:parseFloat(e.target.value)||prices[f]}))} style={{...G.input,fontSize:12,padding:"7px 10px"}}/>
+            </div>)}
+          </div>
+        </div>)}
+      </div>
+    </div>}
+    {/* Rate change log */}
+    <div style={G.card}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13}}>📋 Rate Change History</div>
+      <table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead><tr><th style={G.th}>Date</th><th style={G.th}>Fuel</th><th style={G.th}>Old Rate</th><th style={G.th}>New Rate</th><th style={G.th}>Changed By</th></tr></thead>
+        <tbody>
+          {[{d:"Today 08:12",f:"Petrol",old:"95.80",nw:"96.72",by:"Owner"},{d:"Feb 18",f:"Diesel",old:"88.90",nw:"89.62",by:"Owner"},{d:"Feb 10",f:"CNG",old:"92.50",nw:"94.00",by:"Admin"}].map((r,i)=><tr key={i}>
+            <td style={{...G.td,color:C.muted3}}>{r.d}</td>
+            <td style={G.td}><span style={{...G.badge,background:FUEL.colors[r.f]+"18",color:FUEL.colors[r.f]}}>{r.f}</span></td>
+            <td style={{...G.td,color:C.muted2}}>₹{r.old}</td>
+            <td style={{...G.td,fontWeight:700,color:C.green}}>₹{r.nw}</td>
+            <td style={{...G.td,color:C.muted3}}>{r.by}</td>
+          </tr>)}
+        </tbody>
+      </table>
+    </div>
+    <button onClick={save} style={{...G.btn,background:C.accent,color:"#000",fontWeight:800,padding:"11px 24px",alignSelf:"flex-start"}}>💾 Save Prices →</button>
+  </div>;
+};
+
+// ── Tank Indent / Refill Order System
+const IndentSystem=({db,setDb,ownerId,flash})=>{
+  const[showForm,setShowForm]=useState(false);
+  const[form,setForm]=useState({pumpId:"",tankId:"",fuel:"Petrol",qty:"",supplier:"",deliveryDate:"",notes:""});
+  const myPumps=db.pumps.filter(p=>p.ownerId===ownerId);
+  const myTanks=db.tanks.filter(t=>t.ownerId===ownerId);
+  const indents=db.indents||[];
+  const myIndents=indents.filter(i=>i.ownerId===ownerId);
+  const statusColor={Ordered:C.blue,Dispatched:C.warn,Delivered:C.green,Cancelled:C.red};
+
+  const submitIndent=()=>{
+    if(!form.pumpId||!form.qty)return;
+    const ni={id:"IND-"+Math.floor(1000+Math.random()*9000),ownerId,pumpId:form.pumpId,tankId:form.tankId,fuel:form.fuel,qty:parseFloat(form.qty),supplier:form.supplier||"Primary Supplier",deliveryDate:form.deliveryDate||new Date(Date.now()+86400000).toISOString().slice(0,10),notes:form.notes,status:"Ordered",orderedAt:new Date().toISOString().slice(0,10)};
+    setDb(d=>({...d,indents:[...((d.indents)||[]),ni]}));
+    flash("✓ Indent placed: "+form.qty+"L "+form.fuel+" for "+myPumps.find(p=>p.id===form.pumpId)?.shortName);
+    setForm({pumpId:"",tankId:"",fuel:"Petrol",qty:"",supplier:"",deliveryDate:"",notes:""});
+    setShowForm(false);
+  };
+
+  return <div style={{display:"flex",flexDirection:"column",gap:15}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <div><div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:800}}>📦 Stock Indent & Refill Orders</div><div style={{fontSize:11,color:C.muted3,marginTop:2}}>Place fuel supply orders, track delivery status</div></div>
+      <button onClick={()=>setShowForm(!showForm)} style={{...G.btn,background:C.accent,color:"#000",fontWeight:700}}>+ New Indent</button>
+    </div>
+    {/* Low stock alerts */}
+    {myTanks.filter(t=>t.stock<=t.alertAt).map(t=>{
+      const pump=myPumps.find(p=>p.id===t.pumpId);
+      return <div key={t.id} style={{background:C.redDim,border:`1px solid rgba(244,63,94,.3)`,borderRadius:10,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🔴</span><div><div style={{fontWeight:700,fontSize:12,color:C.red}}>Low Stock Alert — {t.fuel} at {pump?.shortName}</div><div style={{fontSize:10,color:C.muted3}}>{t.stock.toLocaleString()}L remaining (threshold: {t.alertAt.toLocaleString()}L)</div></div></div>
+        <button onClick={()=>{setForm(f=>({...f,pumpId:t.pumpId,tankId:t.id,fuel:t.fuel,qty:String(t.capacity-t.stock)}));setShowForm(true);}} style={{...G.btn,background:C.red,color:"#fff",padding:"6px 13px",fontSize:10}}>Order Now →</button>
+      </div>;
+    })}
+    {showForm&&<div style={{...G.card,padding:20,borderColor:"rgba(245,166,35,.3)"}}>
+      <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:14,marginBottom:16}}>📋 New Indent Order</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:12}}>
+        <div><label style={G.label}>Pump</label><select value={form.pumpId} onChange={e=>setForm(f=>({...f,pumpId:e.target.value}))} style={{...G.input,cursor:"pointer"}}><option value="">— Select —</option>{myPumps.map(p=><option key={p.id} value={p.id}>{p.shortName}</option>)}</select></div>
+        <div><label style={G.label}>Fuel Type</label><select value={form.fuel} onChange={e=>setForm(f=>({...f,fuel:e.target.value}))} style={{...G.input,cursor:"pointer"}}>{["Petrol","Diesel","CNG"].map(f=><option key={f}>{f}</option>)}</select></div>
+        <div><label style={G.label}>Quantity (Litres)</label><input type="number" value={form.qty} onChange={e=>setForm(f=>({...f,qty:e.target.value}))} style={G.input} placeholder="5000"/></div>
+        <div><label style={G.label}>Supplier Name</label><input value={form.supplier} onChange={e=>setForm(f=>({...f,supplier:e.target.value}))} style={G.input} placeholder="Primary Supplier"/></div>
+        <div><label style={G.label}>Expected Delivery</label><input type="date" value={form.deliveryDate} onChange={e=>setForm(f=>({...f,deliveryDate:e.target.value}))} style={G.input}/></div>
+        <div><label style={G.label}>Notes</label><input value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} style={G.input} placeholder="Any special instructions"/></div>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={submitIndent} style={{...G.btn,background:C.accent,color:"#000",fontWeight:700}}>Place Order →</button>
+        <button onClick={()=>setShowForm(false)} style={{...G.btn,background:C.s2,color:C.muted2,border:`1px solid ${C.border}`}}>Cancel</button>
+      </div>
+    </div>}
+    {/* Indent list */}
+    <div style={G.card}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13}}>📦 Order Tracking</div>
+      {myIndents.length===0&&<div style={{padding:24,textAlign:"center",color:C.muted3,fontSize:12}}>No orders yet. Place your first indent above.</div>}
+      {myIndents.length>0&&<table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead><tr><th style={G.th}>ID</th><th style={G.th}>Pump</th><th style={G.th}>Fuel</th><th style={G.th}>Qty</th><th style={G.th}>Supplier</th><th style={G.th}>Delivery</th><th style={G.th}>Status</th><th style={G.th}>Action</th></tr></thead>
+        <tbody>{myIndents.map(i=>{
+          const pump=myPumps.find(p=>p.id===i.pumpId);
+          return <tr key={i.id}>
+            <td style={{...G.td,fontFamily:"monospace",fontSize:10,color:C.muted3}}>{i.id}</td>
+            <td style={{...G.td,fontWeight:600}}>{pump?.shortName||i.pumpId}</td>
+            <td style={G.td}><span style={{...G.badge,background:FUEL.colors[i.fuel]+"18",color:FUEL.colors[i.fuel]}}>{i.fuel}</span></td>
+            <td style={{...G.td,fontWeight:700}}>{i.qty.toLocaleString()}L</td>
+            <td style={{...G.td,color:C.muted3}}>{i.supplier}</td>
+            <td style={{...G.td,color:C.muted3}}>{i.deliveryDate}</td>
+            <td style={G.td}><span style={{...G.badge,background:(statusColor[i.status]||C.muted)+"18",color:statusColor[i.status]||C.muted,border:`1px solid ${(statusColor[i.status]||C.muted)}30`}}>{i.status}</span></td>
+            <td style={G.td}><div style={{display:"flex",gap:5}}>
+              {i.status==="Ordered"&&<button onClick={()=>{setDb(d=>({...d,indents:(d.indents||[]).map(x=>x.id===i.id?{...x,status:"Dispatched"}:x)}));flash("✓ Marked as Dispatched");}} style={{...G.btn,background:C.warnDim,color:C.warn,border:`1px solid rgba(251,191,36,.3)`,padding:"4px 9px",fontSize:9}}>Dispatch</button>}
+              {i.status==="Dispatched"&&<button onClick={()=>{setDb(d=>({...d,indents:(d.indents||[]).map(x=>x.id===i.id?{...x,status:"Delivered"}:x),tanks:d.tanks.map(t=>t.id===i.tankId?{...t,stock:Math.min(t.capacity,t.stock+i.qty)}:t)}));flash("✓ Delivery confirmed: "+i.qty+"L added to tank");}} style={{...G.btn,background:C.greenDim,color:C.green,border:`1px solid rgba(0,229,179,.3)`,padding:"4px 9px",fontSize:9}}>Received ✓</button>}
+              {i.status!=="Delivered"&&i.status!=="Cancelled"&&<button onClick={()=>{setDb(d=>({...d,indents:(d.indents||[]).map(x=>x.id===i.id?{...x,status:"Cancelled"}:x)}));}} style={{...G.btn,background:C.redDim,color:C.red,border:`1px solid rgba(244,63,94,.3)`,padding:"4px 9px",fontSize:9}}>✕</button>}
+            </div></td>
+          </tr>;
+        })}</tbody>
+      </table>}
+    </div>
+    {/* Summary stats */}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+      {[["Total Ordered",myIndents.length,"📦",C.blue],["Pending",myIndents.filter(i=>i.status==="Ordered"||i.status==="Dispatched").length,"⏳",C.warn],["Delivered",myIndents.filter(i=>i.status==="Delivered").length,"✅",C.green],["Cancelled",myIndents.filter(i=>i.status==="Cancelled").length,"❌",C.red]].map(([l,v,ic,c])=><Kpi key={l} label={l} value={v} icon={ic} accent={c}/>)}
+    </div>
+  </div>;
+};
+
+// ── Shift Audit / Edit Module
+const ShiftAuditPanel=({db,setDb,ownerId,flash})=>{
+  const[selectedShift,setSelectedShift]=useState(null);
+  const[editF,setEditF]=useState({});
+  const[auditReason,setAuditReason]=useState("");
+  const myShifts=db.shiftReports.filter(r=>r.ownerId===ownerId).slice(0,20);
+  const myPumps=db.pumps.filter(p=>p.ownerId===ownerId);
+  const auditLog=db.shiftAuditLog||[];
+
+  const submitEdit=()=>{
+    if(!auditReason.trim()){flash("⚠ Audit reason required");return;}
+    const log={id:"AL-"+rid(),shiftId:selectedShift.id,ownerId,timestamp:new Date().toISOString(),reason:auditReason,changes:editF,editedBy:"Owner"};
+    setDb(d=>({...d,
+      shiftReports:d.shiftReports.map(s=>s.id===selectedShift.id?{...s,...editF,status:"Audited"}:s),
+      shiftAuditLog:[...(d.shiftAuditLog||[]),log]
+    }));
+    flash("✓ Shift updated with audit trail logged");
+    setSelectedShift(null);setEditF({});setAuditReason("");
+  };
+
+  return <div style={{display:"flex",flexDirection:"column",gap:15}}>
+    <div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:800}}>🔍 Shift Audit & Edit</div>
+    <div style={{fontSize:11,color:C.muted3,marginBottom:4}}>Edit submitted shift reports with reason logging for compliance</div>
+    {selectedShift&&<div style={{...G.card,padding:20,borderColor:"rgba(167,139,250,.4)"}}>
+      <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:14,marginBottom:16,color:C.purple}}>✏️ Editing: {selectedShift.pumpId} · {selectedShift.date} · {selectedShift.shift}</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:14}}>
+        {[["cash","Cash (₹)"],["card","Card (₹)"],["upi","UPI (₹)"],["variance","Variance (₹)"]].map(([k,l])=><div key={k}>
+          <label style={G.label}>{l}</label>
+          <input type="number" defaultValue={selectedShift[k]||0} onChange={e=>setEditF(f=>({...f,[k]:parseFloat(e.target.value)||0}))} style={{...G.input,borderColor:editF[k]!==undefined?"rgba(167,139,250,.5)":undefined}}/>
+        </div>)}
+      </div>
+      <div style={{marginBottom:14}}><label style={{...G.label,color:C.purple}}>Audit Reason (required)</label><textarea value={auditReason} onChange={e=>setAuditReason(e.target.value)} placeholder="Explain why this shift is being edited (e.g. cash entry error, denomination correction...)" style={{...G.input,minHeight:80,resize:"vertical"}}/></div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={submitEdit} style={{...G.btn,background:C.purple,color:"#fff",fontWeight:700}}>✓ Save with Audit Trail</button>
+        <button onClick={()=>{setSelectedShift(null);setEditF({});setAuditReason("");}} style={{...G.btn,background:C.s2,color:C.muted2,border:`1px solid ${C.border}`}}>Cancel</button>
+      </div>
+    </div>}
+    <div style={G.card}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13}}>Submitted Shifts</div>
+      <table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead><tr><th style={G.th}>Date</th><th style={G.th}>Pump</th><th style={G.th}>Shift</th><th style={G.th}>Sales</th><th style={G.th}>Cash</th><th style={G.th}>Variance</th><th style={G.th}>Status</th><th style={G.th}>Edit</th></tr></thead>
+        <tbody>{myShifts.map(s=>{
+          const pump=myPumps.find(p=>p.id===s.pumpId);
+          return <tr key={s.id}>
+            <td style={{...G.td,color:C.muted3}}>{s.date}</td>
+            <td style={{...G.td,fontWeight:600}}>{pump?.shortName||s.pumpId}</td>
+            <td style={G.td}>{s.shift==="Morning"?"🌅":s.shift==="Afternoon"?"☀️":"🌙"} {s.shift}</td>
+            <td style={{...G.td,fontWeight:700,color:C.accent}}>₹{(s.totalSales||0).toLocaleString()}</td>
+            <td style={G.td}>₹{(s.cash||0).toLocaleString()}</td>
+            <td style={{...G.td,color:(s.variance||0)>0?C.red:(s.variance||0)<0?C.green:C.muted3}}>{s.variance>0?"+":""}{s.variance||0}</td>
+            <td style={G.td}><Sb s={s.status}/></td>
+            <td style={G.td}><button onClick={()=>{setSelectedShift(s);setEditF({});setAuditReason("");}} style={{...G.btn,background:C.purpleDim,color:C.purple,border:`1px solid rgba(167,139,250,.3)`,padding:"4px 10px",fontSize:9}}>✏️ Edit</button></td>
+          </tr>;
+        })}</tbody>
+      </table>
+    </div>
+    {auditLog.length>0&&<div style={G.card}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13}}>🔍 Audit Log</div>
+      <div style={{display:"flex",flexDirection:"column",gap:0}}>{auditLog.slice(-10).reverse().map(a=><div key={a.id} style={{padding:"10px 16px",borderBottom:`1px solid rgba(28,37,64,.5)`,fontSize:11}}>
+        <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontWeight:600,color:C.purple}}>Shift {a.shiftId?.slice(-6)}</span><span style={{color:C.muted3,fontSize:9}}>{new Date(a.timestamp).toLocaleString()}</span></div>
+        <div style={{color:C.muted3,marginTop:2}}>{a.reason}</div>
+      </div>)}</div>
+    </div>}
+  </div>;
+};
+
+// ── Notification Centre (Push alerts for owner)
+const NotificationCentre=({db,setDb,owner,flash})=>{
+  const[filter,setFilter]=useState("all");
+  const notifications=[
+    ...(db.tanks||[]).filter(t=>t.ownerId===owner.id&&t.stock<=t.alertAt).map(t=>({id:"nt-"+t.id,type:"danger",icon:"🔴",title:"Low Stock Alert",body:`${t.fuel} tank at ${(db.pumps||[]).find(p=>p.id===t.pumpId)?.shortName} — only ${t.stock.toLocaleString()}L remaining`,time:"Just now",read:false})),
+    ...((db.machineTests||[]).filter(t=>t.ownerId===owner.id&&(t.result==="Fail"||t.result==="Warning"))).map(t=>({id:"nt-mt-"+t.id,type:t.result==="Fail"?"danger":"warn",icon:t.result==="Fail"?"🔴":"🟡",title:`Machine Test ${t.result}`,body:`Nozzle ${t.nozzleId} at ${(db.pumps||[]).find(p=>p.id===t.pumpId)?.shortName} — ${t.result==="Fail"?"calibration required":"variance high"}`,time:"Today "+t.time,read:false})),
+    {id:"nt-plan",type:owner.endDate&&daysDiff(todayS(),owner.endDate)<=7?"warn":"info",icon:"⚡",title:"Plan Renewal Reminder",body:`${owner.plan} plan expires ${owner.endDate} — ${daysDiff(todayS(),owner.endDate)} days remaining`,time:"Today",read:false},
+    {id:"nt-shift",type:"info",icon:"🔵",title:"Morning Shift Submitted",body:"Koregaon Park — Vikram Desai · ₹42,140",time:"2 hr ago",read:true},
+    {id:"nt-wa",type:"success",icon:"🟢",title:"WhatsApp Delivered",body:"Shift summary sent to +91 98765 43210",time:"3 hr ago",read:true},
+    {id:"nt-cc",type:"warn",icon:"🟡",title:"Credit Limit Warning",body:"Patel Trucks — 99% of ₹20,000 limit used",time:"Yesterday",read:true},
+  ];
+  const filtered=filter==="all"?notifications:notifications.filter(n=>n.type===filter||(!["danger","warn","info","success"].includes(filter)&&n.read===(filter==="read")));
+  const typeColor={danger:C.red,warn:C.warn,info:C.blue,success:C.green};
+
+  return <div style={{display:"flex",flexDirection:"column",gap:15}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <div><div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:800}}>🔔 Notification Centre</div><div style={{fontSize:11,color:C.muted3,marginTop:2}}>Alerts for stock, tests, plan renewal, payments & WhatsApp</div></div>
+      <div style={{display:"flex",gap:6}}>
+        {["all","danger","warn","info"].map(f=><button key={f} onClick={()=>setFilter(f)} style={{...G.btn,background:filter===f?(typeColor[f]||C.accent):C.s2,color:filter===f?(f==="warn"?"#000":"#fff"):C.muted2,border:`1px solid ${filter===f?(typeColor[f]||C.accent):C.border}`,padding:"5px 11px",fontSize:9,textTransform:"capitalize"}}>{f==="all"?"All Alerts":f==="danger"?"🔴 Critical":f==="warn"?"🟡 Warning":"🔵 Info"}</button>)}
+      </div>
+    </div>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {filtered.map(n=><div key={n.id} style={{...G.card,padding:"14px 18px",display:"flex",gap:14,alignItems:"flex-start",borderLeft:`3px solid ${typeColor[n.type]||C.blue}`,opacity:n.read?0.7:1}}>
+        <span style={{fontSize:20}}>{n.icon}</span>
+        <div style={{flex:1}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+            <span style={{fontWeight:700,fontSize:12,color:typeColor[n.type]||C.text}}>{n.title}</span>
+            <span style={{fontSize:9,color:C.muted3}}>{n.time}</span>
+          </div>
+          <div style={{fontSize:11,color:C.muted3}}>{n.body}</div>
+        </div>
+        {!n.read&&<div style={{width:8,height:8,borderRadius:"50%",background:typeColor[n.type]||C.blue,flexShrink:0,marginTop:5}}/>}
+      </div>)}
+    </div>
+    {/* WhatsApp config reminder */}
+    {!owner.whatsapp&&<div style={{background:C.greenDim,border:`1px solid rgba(0,229,179,.25)`,borderRadius:10,padding:"14px 18px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <div><div style={{fontWeight:700,color:C.green,marginBottom:3}}>💬 Enable WhatsApp Alerts</div><div style={{fontSize:10,color:C.muted3}}>Get instant shift reports, stock alerts and payment confirmations on WhatsApp</div></div>
+      <button style={{...G.btn,background:C.green,color:"#000",fontWeight:700}}>Enable →</button>
+    </div>}
+  </div>;
+};
+
+// ── PDF Export System — Shift PDF, GST PDF, Analytics PDF
+const buildShiftPDF=(shift,readings,pumps)=>{
+  const pump=pumps.find(p=>p.id===shift.pumpId)||{name:shift.pumpId,shortName:shift.pumpId,gst:"",address:""};
+  const icon=shift.shift==="Morning"?"🌅":shift.shift==="Afternoon"?"☀️":"🌙";
+  const rows=(readings||[]).map(r=>`<tr>
+    <td>${r.nozzleId}</td><td>${r.fuel}</td>
+    <td style="font-family:monospace">${(r.openReading||0).toFixed(2)}</td>
+    <td style="font-family:monospace">${(r.closeReading||0).toFixed(2)}</td>
+    <td>${((r.closeReading||0)-(r.openReading||0)-(r.testVol||0)).toFixed(2)}L</td>
+    <td style="font-weight:700">₹${(r.revenue||0).toLocaleString()}</td>
+    <td>${r.operator||"—"}</td>
+  </tr>`).join("");
+  return `
+  <table style="width:100%;border-collapse:collapse;margin-bottom:24px;border:2px solid #111">
+    <tr style="background:#f5f5f5"><th colspan="7" style="padding:10px;text-align:left;font-size:14px">${icon} ${shift.shift} Shift — ${shift.date} · ${pump.name}</th></tr>
+    <tr style="background:#eee"><td style="padding:7px;font-size:10px">PUMP</td><td colspan="3">${pump.name}</td><td>GST</td><td colspan="2">${pump.gst||"—"}</td></tr>
+    <tr style="background:#eee"><td style="padding:7px;font-size:10px">SHIFT</td><td>${shift.shift}</td><td>DATE</td><td>${shift.date}</td><td>MANAGER</td><td colspan="2">${shift.manager||"—"}</td></tr>
+  </table>
+  <table style="width:100%;border-collapse:collapse;margin-bottom:18px">
+    <thead><tr style="background:#111;color:#fff"><th style="padding:8px;text-align:left">Nozzle</th><th>Fuel</th><th>Open</th><th>Close</th><th>Volume</th><th>Revenue</th><th>Operator</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="kpi-val">₹${(shift.totalSales||0).toLocaleString()}</div><div class="kpi-label">Total Sales</div></div>
+    <div class="kpi"><div class="kpi-val">₹${(shift.cash||0).toLocaleString()}</div><div class="kpi-label">Cash</div></div>
+    <div class="kpi"><div class="kpi-val">₹${(shift.card||0).toLocaleString()}</div><div class="kpi-label">Card</div></div>
+    <div class="kpi"><div class="kpi-val">₹${(shift.upi||0).toLocaleString()}</div><div class="kpi-label">UPI</div></div>
+  </div>
+  <p style="color:${(shift.variance||0)>100?"#c00":(shift.variance||0)<-100?"#060":"#666"};margin-top:8px">
+    Variance: ${shift.variance>=0?"+":""}${shift.variance||0} · Status: ${shift.status||"Submitted"}
+  </p>`;
+};
+
+const buildGSTPDF=(sales,pumps,owner,period)=>{
+  const totals={petrol:0,diesel:0,cng:0};
+  sales.forEach(s=>{totals.petrol+=s.petrol;totals.diesel+=s.diesel;totals.cng+=s.cng;});
+  const rows=["Petrol","Diesel","CNG"].map(f=>{
+    const gross=totals[f.toLowerCase()];
+    if(!gross)return "";
+    const taxable=Math.round(gross/1.18);
+    const cgst=Math.round(taxable*.09);
+    return `<tr>
+      <td>${FUEL.hsn[f]}</td><td>${f}</td>
+      <td>₹${taxable.toLocaleString()}</td>
+      <td>₹${cgst.toLocaleString()}</td><td>₹${cgst.toLocaleString()}</td>
+      <td style="font-weight:700">₹${(cgst*2).toLocaleString()}</td>
+      <td style="font-weight:700">₹${gross.toLocaleString()}</td>
+    </tr>`;
+  }).join("");
+  const totalGross=totals.petrol+totals.diesel+totals.cng;
+  const totalTaxable=Math.round(totalGross/1.18);
+  const totalGST=Math.round(totalTaxable*.18);
+  return `
+  <table style="width:100%;border-collapse:collapse;margin-bottom:16px;border:2px solid #111">
+    <tr style="background:#f5f5f5"><th colspan="4" style="padding:10px;text-align:left">GSTIN</th><td colspan="3" style="padding:10px;font-weight:700">${owner.gst||"Not configured"}</td></tr>
+    <tr style="background:#f5f5f5"><th colspan="4" style="padding:8px;text-align:left">Business</th><td colspan="3" style="padding:8px">${owner.name}</td></tr>
+    <tr style="background:#f5f5f5"><th colspan="4" style="padding:8px;text-align:left">Period</th><td colspan="3" style="padding:8px">${period}</td></tr>
+  </table>
+  <table style="width:100%;border-collapse:collapse;margin-bottom:18px">
+    <thead><tr style="background:#111;color:#fff"><th style="padding:8px;text-align:left">HSN</th><th>Fuel</th><th>Taxable Value</th><th>CGST 9%</th><th>SGST 9%</th><th>Total GST</th><th>Gross Revenue</th></tr></thead>
+    <tbody>${rows}</tbody>
+    <tfoot><tr style="background:#f9f9f9;font-weight:700"><td colspan="2" style="padding:8px">TOTAL</td><td>₹${totalTaxable.toLocaleString()}</td><td>₹${Math.round(totalGST/2).toLocaleString()}</td><td>₹${Math.round(totalGST/2).toLocaleString()}</td><td>₹${totalGST.toLocaleString()}</td><td>₹${totalGross.toLocaleString()}</td></tr></tfoot>
+  </table>
+  <p style="font-size:11px;color:#777">This report is generated for informational purposes. Please consult your CA for GSTR filing. Data covers ${sales.length} days of sales.</p>`;
+};
+
+const PDFExportModal=({type,data,onClose,filename})=>{
+  const printContent=()=>{
+    const w=window.open("","_blank","width=900,height=700");
+    if(!w)return;
+    w.document.write(`<!DOCTYPE html><html><head><title>FuelOS — ${type}</title>
+    <meta charset="utf-8">
+    <style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{font-family:'Segoe UI',Arial,sans-serif;background:#fff;color:#111;padding:40px;max-width:860px;margin:0 auto;font-size:13px;line-height:1.5}
+      h1{font-size:24px;font-weight:900;margin-bottom:6px;letter-spacing:-0.5px}
+      h2{font-size:15px;font-weight:700;margin:20px 0 10px;color:#333;border-bottom:1px solid #ddd;padding-bottom:5px}
+      table{width:100%;border-collapse:collapse;margin-bottom:20px}
+      th{text-align:left;padding:9px 10px;font-size:10px;letter-spacing:1.2px;text-transform:uppercase;border-bottom:2px solid #111;background:#f8f8f8}
+      td{padding:9px 10px;border-bottom:1px solid #e8e8e8;font-size:12px}
+      tr:nth-child(even) td{background:#fafafa}
+      .kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:16px 0}
+      .kpi{border:1px solid #e0e0e0;border-radius:8px;padding:14px;text-align:center}
+      .kpi-val{font-size:20px;font-weight:900;color:#111}
+      .kpi-label{font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#888;margin-top:3px}
+      .header-bar{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:28px;padding-bottom:16px;border-bottom:2px solid #111}
+      .logo{font-size:22px;font-weight:900;letter-spacing:-1px}
+      .logo span{color:#f5a623}
+      .meta{text-align:right;font-size:11px;color:#777;line-height:1.8}
+      .footer{margin-top:32px;padding-top:12px;border-top:1px solid #ddd;font-size:9px;color:#bbb;display:flex;justify-content:space-between}
+      @media print{
+        body{padding:20px}
+        button{display:none}
+        .no-print{display:none}
+      }
+    </style></head><body>
+    <div class="header-bar">
+      <div><div class="logo">⛽ Fuel<span>OS</span></div><h1>${type}</h1></div>
+      <div class="meta">
+        <div>Generated: ${new Date().toLocaleString("en-IN")}</div>
+        <div>Platform: FuelOS v8</div>
+        <div>Report ID: RPT-${Math.random().toString(36).slice(2,10).toUpperCase()}</div>
+      </div>
+    </div>
+    <div class="no-print" style="margin-bottom:20px">
+      <button onclick="window.print()" style="padding:10px 22px;background:#111;color:#fff;border:none;border-radius:6px;font-size:13px;cursor:pointer;font-weight:700">🖨️ Print / Save as PDF</button>
+      <button onclick="window.close()" style="padding:10px 16px;background:#f5f5f5;border:1px solid #ddd;border-radius:6px;font-size:13px;cursor:pointer;margin-left:8px">✕ Close</button>
+    </div>
+    ${data}
+    <div class="footer">
+      <span>FuelOS v8 · Automated Report · Confidential</span>
+      <span>${new Date().toLocaleDateString("en-IN")}</span>
+    </div>
+    </body></html>`);
+    w.document.close();
+  };
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(5,6,15,.85)",zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(4px)"}}>
+      <div style={{...G.card,padding:28,width:440,borderColor:"rgba(75,141,248,.4)"}}>
+        <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:18,marginBottom:4}}>📄 {type}</div>
+        <div style={{fontSize:11,color:C.muted3,marginBottom:20}}>A new window will open with print-ready formatting. Use your browser's <strong style={{color:C.text}}>Print → Save as PDF</strong> option.</div>
+        <div style={{background:C.s2,borderRadius:9,padding:"12px 14px",marginBottom:18,fontSize:10,color:C.muted3}}>
+          <div>✓ Professional header with FuelOS branding</div>
+          <div>✓ KPI summary cards</div>
+          <div>✓ Full data tables</div>
+          <div>✓ Optimized for A4 paper</div>
+        </div>
+        <div style={{display:"flex",gap:10}}>
+          <button onClick={printContent} style={{...G.btn,background:C.blue,color:"#fff",fontWeight:700,flex:1,justifyContent:"center",padding:"11px"}}>🖨️ Open Print Window</button>
+          <button onClick={onClose} style={{...G.btn,background:C.s2,color:C.muted2,border:`1px solid ${C.border}`}}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+// ── Advanced Analytics — Full v8 with per-pump, trend, PDF, payment split, volume
+const AdvancedAnalytics=({db,ownerId,pumps,activePump,flash})=>{
+  const[period,setPeriod]=useState("7d");
+  const[pdfModal,setPdfModal]=useState(false);
+  const[viewPump,setViewPump]=useState(activePump||null);
+  const pumpColors=["#f5a623","#4b8df8","#06b6d4","#a78bfa","#00e5b3","#f43f5e"];
+  const myPumps=pumps||db.pumps.filter(p=>p.ownerId===ownerId);
+
+  const allSales=db.sales.filter(s=>s.ownerId===ownerId);
+  const sales=viewPump?allSales.filter(s=>s.pumpId===viewPump):allSales;
+  const days=period==="7d"?7:period==="30d"?30:90;
+  const cutoff=new Date();cutoff.setDate(cutoff.getDate()-days);
+  const cutStr=cutoff.toISOString().slice(0,10);
+  const filtSales=sales.filter(s=>s.date>=cutStr);
+
+  const totalRev=filtSales.reduce((s,d)=>s+d.petrol+d.diesel+d.cng,0);
+  const petrolRev=filtSales.reduce((s,d)=>s+d.petrol,0);
+  const dieselRev=filtSales.reduce((s,d)=>s+d.diesel,0);
+  const cngRev=filtSales.reduce((s,d)=>s+d.cng,0);
+  const totalVol=petrolRev/FUEL.rates.Petrol+dieselRev/FUEL.rates.Diesel+cngRev/FUEL.rates.CNG;
+
+  const pumpRevenue=myPumps.map((p,i)=>{
+    const rev=allSales.filter(s=>s.pumpId===p.id&&s.date>=cutStr).reduce((s,d)=>s+d.petrol+d.diesel+d.cng,0);
+    const vol=allSales.filter(s=>s.pumpId===p.id&&s.date>=cutStr).reduce((s,d)=>s+d.petrol/FUEL.rates.Petrol+d.diesel/FUEL.rates.Diesel+d.cng/FUEL.rates.CNG,0);
+    return {...p,rev,vol:Math.round(vol),color:pumpColors[i%pumpColors.length]};
+  });
+  const totalAllPumps=pumpRevenue.reduce((s,p)=>s+p.rev,0);
+  const topPump=pumpRevenue.reduce((a,b)=>a.rev>b.rev?a:b,{rev:0,shortName:"—",name:"—"});
+
+  // Shift-wise breakdown
+  const myShifts=db.shiftReports.filter(r=>r.ownerId===ownerId&&(viewPump?r.pumpId===viewPump:true)&&r.date>=cutStr);
+  const cashTotal=myShifts.reduce((s,r)=>s+(r.cash||0),0);
+  const cardTotal=myShifts.reduce((s,r)=>s+(r.card||0),0);
+  const upiTotal=myShifts.reduce((s,r)=>s+(r.upi||0),0);
+  const cashUpi=cashTotal+cardTotal+upiTotal||1;
+
+  // Shift performance (morning vs afternoon vs night)
+  const byShift=["Morning","Afternoon","Night"].map(sh=>{
+    const rs=myShifts.filter(r=>r.shift===sh);
+    return {shift:sh,rev:rs.reduce((s,r)=>s+r.totalSales,0),count:rs.length,icon:sh==="Morning"?"🌅":sh==="Afternoon"?"☀️":"🌙",color:sh==="Morning"?C.accent:sh==="Afternoon"?C.blue:C.purple};
+  });
+
+  const pdfHtml=`<div class="kpi-grid">
+    <div class="kpi"><div class="kpi-val">₹${(totalRev/100000).toFixed(2)}L</div><div class="kpi-label">Revenue (${period})</div></div>
+    <div class="kpi"><div class="kpi-val">${Math.round(totalVol).toLocaleString()}L</div><div class="kpi-label">Volume Sold</div></div>
+    <div class="kpi"><div class="kpi-val">${myPumps.length}</div><div class="kpi-label">Pumps</div></div>
+    <div class="kpi"><div class="kpi-val">${topPump.shortName}</div><div class="kpi-label">Top Pump</div></div>
+  </div>
+  <h2>Pump Performance</h2>
+  <table><thead><tr><th>Pump</th><th>Revenue</th><th>Volume</th><th>Share %</th></tr></thead><tbody>
+  ${pumpRevenue.map(p=>`<tr><td>${p.name}</td><td>₹${p.rev.toLocaleString()}</td><td>${p.vol.toLocaleString()}L</td><td>${totalAllPumps?Math.round(p.rev/totalAllPumps*100):0}%</td></tr>`).join("")}
+  </tbody></table>
+  <h2>Shift-wise Breakdown</h2>
+  <table><thead><tr><th>Shift</th><th>Total Sales</th><th>Shifts Filed</th><th>Avg/Shift</th></tr></thead><tbody>
+  ${byShift.map(s=>`<tr><td>${s.shift}</td><td>₹${s.rev.toLocaleString()}</td><td>${s.count}</td><td>₹${s.count?Math.round(s.rev/s.count).toLocaleString():0}</td></tr>`).join("")}
+  </tbody></table>
+  <h2>Payment Mix</h2>
+  <table><thead><tr><th>Method</th><th>Amount</th><th>Share</th></tr></thead><tbody>
+  <tr><td>Cash</td><td>₹${cashTotal.toLocaleString()}</td><td>${Math.round(cashTotal/cashUpi*100)}%</td></tr>
+  <tr><td>Card</td><td>₹${cardTotal.toLocaleString()}</td><td>${Math.round(cardTotal/cashUpi*100)}%</td></tr>
+  <tr><td>UPI</td><td>₹${upiTotal.toLocaleString()}</td><td>${Math.round(upiTotal/cashUpi*100)}%</td></tr>
+  </tbody></table>`;
+
+  return <div style={{display:"flex",flexDirection:"column",gap:15}}>
+    {pdfModal&&<PDFExportModal type={`Analytics — ${period} Report`} data={pdfHtml} onClose={()=>setPdfModal(false)}/>}
+    {/* Toolbar */}
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+      <div>
+        <div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:800}}>📈 Advanced Analytics</div>
+        <div style={{fontSize:11,color:C.muted3,marginTop:2}}>Revenue trends · pump performance · shift analysis · payment mix</div>
+      </div>
+      <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+        {["7d","30d","90d"].map(p=><button key={p} onClick={()=>setPeriod(p)} style={{...G.btn,background:period===p?C.accent:C.s2,color:period===p?"#000":C.muted2,border:`1px solid ${period===p?C.accent:C.border}`,padding:"5px 12px",fontSize:10}}>{p}</button>)}
+        <button onClick={()=>setPdfModal(true)} style={{...G.btn,background:C.blue,color:"#fff",padding:"5px 13px",fontSize:10}}>📄 PDF</button>
+      </div>
+    </div>
+    {/* Pump filter pills */}
+    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+      <div onClick={()=>setViewPump(null)} style={{padding:"4px 12px",borderRadius:20,cursor:"pointer",border:`1px solid ${viewPump===null?C.accent:C.border}`,background:viewPump===null?C.accentDim:"transparent",color:viewPump===null?C.accent:C.muted3,fontSize:10,fontWeight:700}}>All Pumps</div>
+      {myPumps.map((p,i)=><div key={p.id} onClick={()=>setViewPump(p.id)} style={{padding:"4px 12px",borderRadius:20,cursor:"pointer",border:`1px solid ${viewPump===p.id?pumpColors[i]:C.border}`,background:viewPump===p.id?pumpColors[i]+"18":"transparent",color:viewPump===p.id?pumpColors[i]:C.muted3,fontSize:10,fontWeight:700}}>⛽ {p.shortName}</div>)}
+    </div>
+    {/* KPIs */}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+      <Kpi label={`Revenue (${period})`} value={fmtL(totalRev)} sub={viewPump?myPumps.find(p=>p.id===viewPump)?.shortName:"All pumps"} accent={C.accent} icon="💰"/>
+      <Kpi label="Volume Sold" value={Math.round(totalVol).toLocaleString()+"L"} sub="Petrol+Diesel+CNG" accent={C.blue} icon="⛽"/>
+      <Kpi label="Top Pump" value={topPump.shortName} sub={fmtL(topPump.rev)} accent={C.green} icon="🏆"/>
+      <Kpi label="Avg/Day" value={fmtL(Math.round(totalRev/days))} sub={`${myShifts.length} shifts`} accent={C.purple} icon="📊"/>
+    </div>
+    {/* Main charts row */}
+    <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:12}}>
+      <div style={{...G.card,padding:18}}>
+        <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13,marginBottom:3}}>📊 Daily Revenue — Petrol · Diesel · CNG</div>
+        <div style={{fontSize:9,color:C.muted3,marginBottom:14}}>Stacked bar · hover for values</div>
+        <BarChart data={filtSales.map(d=>({label:d.date.slice(5),petrol:d.petrol,diesel:d.diesel,cng:d.cng}))} keys={["petrol","diesel","cng"]} colors={[C.blue,C.accent,C.green]} h={140}/>
+        <div style={{display:"flex",gap:16,marginTop:10}}>
+          {[["Petrol",C.blue,petrolRev],["Diesel",C.accent,dieselRev],["CNG",C.green,cngRev]].map(([l,c,v])=><div key={l} style={{display:"flex",alignItems:"center",gap:5,fontSize:10}}>
+            <div style={{width:8,height:8,borderRadius:2,background:c}}/><span style={{color:C.muted3}}>{l}</span><span style={{fontWeight:700,color:c}}>{fmtL(v)}</span>
+          </div>)}
+        </div>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        <div style={{...G.card,padding:16}}>
+          <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:12,marginBottom:8}}>⛽ Pump Revenue Share</div>
+          <Donut segs={pumpRevenue.map(p=>({v:p.rev,c:p.color}))} size={80}/>
+          <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:4}}>
+            {pumpRevenue.map(p=><div key={p.id} style={{display:"flex",justifyContent:"space-between",fontSize:10}}>
+              <div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:6,height:6,borderRadius:"50%",background:p.color}}/><span style={{color:C.muted3}}>{p.shortName}</span></div>
+              <span style={{fontWeight:700,color:p.color}}>{totalAllPumps?Math.round(p.rev/totalAllPumps*100):0}%</span>
+            </div>)}
+          </div>
+        </div>
+        <div style={{...G.card,padding:16}}>
+          <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:12,marginBottom:8}}>💳 Payment Mix</div>
+          <Donut segs={[{v:cashTotal,c:C.accent},{v:cardTotal,c:C.blue},{v:upiTotal,c:C.green}]} size={80}/>
+          <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:4}}>
+            {[["Cash",cashTotal,C.accent],["Card",cardTotal,C.blue],["UPI",upiTotal,C.green]].map(([l,v,c])=><div key={l} style={{display:"flex",justifyContent:"space-between",fontSize:10}}><div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:6,height:6,borderRadius:"50%",background:c}}/><span style={{color:C.muted3}}>{l}</span></div><span style={{fontWeight:700,color:c}}>{Math.round(v/cashUpi*100)}%</span></div>)}
+          </div>
+        </div>
+      </div>
+    </div>
+    {/* Shift performance */}
+    <div style={{...G.card,overflow:"hidden"}}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13}}>🕐 Shift-wise Performance</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:0}}>
+        {byShift.map((s,i)=><div key={s.shift} style={{padding:16,borderRight:i<2?`1px solid ${C.border}`:undefined}}>
+          <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8}}>
+            <span style={{fontSize:18}}>{s.icon}</span>
+            <span style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:12,color:s.color}}>{s.shift}</span>
+          </div>
+          <div style={{fontSize:20,fontWeight:800,color:C.text,marginBottom:2}}>{fmtL(s.rev)}</div>
+          <div style={{fontSize:9,color:C.muted3,marginBottom:8}}>{s.count} shifts · avg {s.count?fmtL(Math.round(s.rev/s.count)):"—"}</div>
+          <div style={{height:4,background:C.s3,borderRadius:2}}><div style={{height:"100%",width:byShift.reduce((a,b)=>a.rev>b.rev?a:b,{rev:1}).rev>0?(s.rev/byShift.reduce((a,b)=>a.rev>b.rev?a:b,{rev:1}).rev*100)+"%":"0%",background:s.color,borderRadius:2}}/></div>
+        </div>)}
+      </div>
+    </div>
+    {/* Pump performance table */}
+    <div style={G.card}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13}}>⛽ Pump Performance Table</div>
+      <table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead><tr><th style={G.th}>Pump</th><th style={G.th}>Revenue</th><th style={G.th}>Volume (L)</th><th style={G.th}>Avg/Day</th><th style={G.th}>Share</th><th style={G.th}>Trend</th></tr></thead>
+        <tbody>{pumpRevenue.map(p=>{
+          const share=totalAllPumps?Math.round(p.rev/totalAllPumps*100):0;
+          const avgDay=Math.round(p.rev/days);
+          const trend=Math.round((Math.random()-.3)*20+5);
+          return <tr key={p.id}>
+            <td style={{...G.td,fontWeight:700}}><div style={{display:"flex",alignItems:"center",gap:8}}><div style={{width:3,height:24,borderRadius:2,background:p.color}}/>{p.shortName}</div></td>
+            <td style={{...G.td,fontWeight:700,color:C.accent}}>{fmtL(p.rev)}</td>
+            <td style={{...G.td,color:C.muted3}}>{p.vol.toLocaleString()}L</td>
+            <td style={{...G.td,color:C.muted2}}>{fmtL(avgDay)}</td>
+            <td style={G.td}><div style={{display:"flex",alignItems:"center",gap:7}}><div style={{flex:1,height:4,background:C.s3,borderRadius:2,minWidth:60}}><div style={{height:"100%",width:share+"%",background:p.color,borderRadius:2}}/></div><span style={{fontSize:9,color:p.color,fontWeight:700,minWidth:24}}>{share}%</span></div></td>
+            <td style={{...G.td,fontWeight:700,color:trend>=0?C.green:C.red,fontSize:13}}>{trend>=0?"↑":"↓"}{Math.abs(trend)}%</td>
+          </tr>;
+        })}</tbody>
+      </table>
+    </div>
+  </div>;
+};
+
+
+// ── Razorpay v8 — Full order→verify flow with method selection + animations
+const RazorpayGateway=({owner,plan,billing,amount,base,gst,discount,txnId,onSuccess,onCancel})=>{
+  const[step,setStep]=useState("review");
+  const[method,setMethod]=useState("upi");
+  const[upiId,setUpiId]=useState("");
+  const[cardNo,setCardNo]=useState("");
+  const[cardExp,setCardExp]=useState("");
+  const[cardCvv,setCardCvv]=useState("");
+  const[bank,setBank]=useState("SBI");
+  const[dots,setDots]=useState(".");
+  useEffect(()=>{
+    if(step!=="processing")return;
+    const iv=setInterval(()=>setDots(d=>d.length>=3?".":"d.".repeat(d.length+1))  ,400);
+    return ()=>clearInterval(iv);
+  },[step]);
+  const simulate=()=>{
+    if(method==="upi"&&!upiId.includes("@")){alert("Enter valid UPI ID e.g. name@upi");return;}
+    setStep("processing");
+    setTimeout(()=>{
+      const ok=Math.random()>.12;
+      setStep(ok?"success":"failed");
+      if(ok)setTimeout(()=>onSuccess({txnId,plan,billing,amount,base,gst,credit:discount||0,method,razorpay_payment_id:"pay_"+rid().slice(0,16)}),1400);
+    },2800);
+  };
+  const planDef=PLANS[plan]||PLANS.Starter;
+
+  if(step==="processing")return(
+    <div style={{...G.card,padding:52,textAlign:"center",background:C.s1,borderColor:C.border2}}>
+      <div style={{width:56,height:56,borderRadius:"50%",border:`3px solid ${C.border}`,borderTopColor:C.blue,animation:"spin 0.9s linear infinite",margin:"0 auto 20px"}}/>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:18,marginBottom:8}}>Processing{dots}</div>
+      <div style={{fontSize:11,color:C.muted3}}>Verifying with Razorpay · Do not refresh</div>
+      <div style={{marginTop:16,fontSize:10,color:C.muted,background:C.s2,borderRadius:8,padding:"8px 14px",display:"inline-block"}}>TXN: {txnId}</div>
+    </div>
+  );
+  if(step==="success")return(
+    <div style={{...G.card,padding:52,textAlign:"center",borderColor:"rgba(0,229,179,.4)",background:"rgba(0,229,179,.04)"}}>
+      <div style={{fontSize:52,marginBottom:14}}>✅</div>
+      <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:22,color:C.green,marginBottom:6}}>Payment Successful!</div>
+      <div style={{fontSize:12,color:C.muted3,marginBottom:4}}>{planDef.icon} {plan} plan activated</div>
+      <div style={{fontSize:11,color:C.muted3}}>Valid for {billing==="yearly"?"365 days":"30 days"} · WhatsApp confirmation sent</div>
+      <div style={{marginTop:16,fontSize:10,color:C.muted3,background:C.s2,borderRadius:8,padding:"8px 14px",display:"inline-flex",gap:12}}>
+        <span>TXN: {txnId}</span><span>·</span><span>₹{amount.toLocaleString()} charged</span><span>·</span><span style={{color:C.green}}>{method.toUpperCase()}</span>
+      </div>
+    </div>
+  );
+  if(step==="failed")return(
+    <div style={{...G.card,padding:52,textAlign:"center",borderColor:"rgba(244,63,94,.4)",background:"rgba(244,63,94,.04)"}}>
+      <div style={{fontSize:52,marginBottom:14}}>❌</div>
+      <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:22,color:C.red,marginBottom:6}}>Payment Failed</div>
+      <div style={{fontSize:11,color:C.muted3,marginBottom:24}}>Your bank declined the transaction. No amount was charged.</div>
+      <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+        <button onClick={()=>setStep("review")} style={{...G.btn,background:C.accent,color:"#000",fontWeight:700}}>Try Again →</button>
+        <button onClick={onCancel} style={{...G.btn,background:C.s2,color:C.muted2,border:`1px solid ${C.border}`}}>Cancel</button>
+      </div>
+    </div>
+  );
+
+  return(
+    <div style={{...G.card,padding:24,borderColor:"rgba(75,141,248,.35)",background:"rgba(75,141,248,.03)"}}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+        <div><div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:18}}>💳 Complete Your Payment</div><div style={{fontSize:10,color:C.muted3,marginTop:2}}>Powered by Razorpay · PCI-DSS Compliant</div></div>
+        <div style={{display:"flex",alignItems:"center",gap:6,fontSize:9,color:C.green,background:"rgba(0,229,179,.08)",border:"1px solid rgba(0,229,179,.2)",padding:"5px 10px",borderRadius:7}}>🔒 256-bit SSL</div>
+      </div>
+      {/* Order summary */}
+      <div style={{background:C.s2,borderRadius:10,padding:"14px 16px",marginBottom:18}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <div style={{fontSize:11,color:C.muted3}}>Plan</div>
+          <div style={{fontWeight:700,color:planDef.color||C.accent}}>{planDef.icon} {plan} ({billing})</div>
+        </div>
+        {discount>0&&<div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:6,color:C.green}}><span>Coupon Discount</span><span>-₹{discount.toLocaleString()}</span></div>}
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:C.muted3,marginBottom:4}}><span>Base amount</span><span>₹{base.toLocaleString()}</span></div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:C.muted3,marginBottom:10}}><span>GST 18%</span><span>₹{gst.toLocaleString()}</span></div>
+        <div style={{borderTop:`1px solid ${C.border}`,paddingTop:10,display:"flex",justifyContent:"space-between"}}>
+          <span style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:15}}>Total</span>
+          <span style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:18,color:C.accent}}>₹{amount.toLocaleString()}</span>
+        </div>
+      </div>
+      {/* Payment method */}
+      <div style={{marginBottom:16}}>
+        <label style={G.label}>Payment Method</label>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
+          {[["upi","📱","UPI"],["card","💳","Card"],["netbanking","🏦","NetBanking"]].map(([m,ic,l])=>(
+            <div key={m} onClick={()=>setMethod(m)} style={{padding:"10px 12px",borderRadius:9,border:`1px solid ${method===m?C.blue:C.border}`,background:method===m?"rgba(75,141,248,.1)":C.s2,cursor:"pointer",textAlign:"center",fontSize:11,fontWeight:700,color:method===m?C.blue:C.muted2,transition:"all .15s"}}>
+              <div style={{fontSize:16,marginBottom:3}}>{ic}</div>{l}
+            </div>
+          ))}
+        </div>
+        {method==="upi"&&<div>
+          <label style={G.label}>UPI ID</label>
+          <input value={upiId} onChange={e=>setUpiId(e.target.value)} style={G.input} placeholder="yourname@upi or phone@paytm" onFocus={e=>e.target.style.borderColor=C.blue} onBlur={e=>e.target.style.borderColor=C.border}/>
+          <div style={{marginTop:8,display:"flex",gap:6,flexWrap:"wrap"}}>
+            {["@paytm","@googlepay","@phonepe","@ybl"].map(s=><div key={s} onClick={()=>setUpiId("9876543210"+s)} style={{fontSize:9,padding:"3px 8px",borderRadius:5,background:C.s2,border:`1px solid ${C.border}`,color:C.muted3,cursor:"pointer"}}>{s}</div>)}
+          </div>
+        </div>}
+        {method==="card"&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div style={{gridColumn:"1/-1"}}><label style={G.label}>Card Number</label><input maxLength="19" value={cardNo} onChange={e=>setCardNo(e.target.value.replace(/\D/g,"").replace(/(.{4})/g,"$1 ").trim())} style={{...G.input,letterSpacing:2}} placeholder="4242 4242 4242 4242"/></div>
+          <div><label style={G.label}>Expiry</label><input style={G.input} value={cardExp} onChange={e=>setCardExp(e.target.value.replace(/[^0-9/]/g,""))} placeholder="MM/YY" maxLength="5"/></div>
+          <div><label style={G.label}>CVV</label><input type="password" value={cardCvv} onChange={e=>setCardCvv(e.target.value.slice(0,4))} style={G.input} placeholder="•••"/></div>
+          <div style={{gridColumn:"1/-1",fontSize:9,color:C.muted3,display:"flex",gap:8,alignItems:"center"}}>
+            <span>💳 Visa</span><span>💳 Mastercard</span><span>💳 RuPay</span><span>💳 Amex</span>
+          </div>
+        </div>}
+        {method==="netbanking"&&<div>
+          <label style={G.label}>Select Your Bank</label>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+            {[["SBI","🏦"],["HDFC","🏦"],["ICICI","🏦"],["Axis","🏦"],["Kotak","🏦"],["Other","🏦"]].map(([b,ic])=>(
+              <div key={b} onClick={()=>setBank(b)} style={{padding:"10px",borderRadius:8,border:`1px solid ${bank===b?C.blue:C.border}`,background:bank===b?"rgba(75,141,248,.1)":C.s2,cursor:"pointer",textAlign:"center",fontSize:11,fontWeight:700,color:bank===b?C.blue:C.muted3}}>{b}</div>
+            ))}
+          </div>
+        </div>}
+      </div>
+      {/* Pay button */}
+      <button onClick={simulate} style={{...G.btn,background:`linear-gradient(135deg,${C.blue},#6366f1)`,color:"#fff",fontWeight:800,width:"100%",justifyContent:"center",padding:"14px",fontSize:13,borderRadius:11,boxShadow:`0 8px 24px rgba(75,141,248,.35)`}}>
+        🔒 Pay ₹{amount.toLocaleString()} Securely →
+      </button>
+      <div style={{marginTop:10,fontSize:9,color:C.muted,textAlign:"center"}}>TXN: {txnId} · Demo mode — no real charges</div>
+    </div>
+  );
+};
+
+
+// ═══════════════════════════════════════════════════════════
 // OWNER DASHBOARD — Multi-Pump with Consolidated View
 // ═══════════════════════════════════════════════════════════
-const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
+const OwnerDash=({owner,setOwner,db,setDb,onLogout})=>{
   const[tab,setTab]=useState("overview");
   const[activePump,setActivePump]=useState(null); // null = consolidated view
   const[gw,setGw]=useState(null);
+  const[rzpOrder,setRzpOrder]=useState(null); // {plan,billing,amount,base,gst,txnId}
   const[showTestForm,setShowTestForm]=useState(false);
   const[billing,setBilling]=useState("monthly");
   const[notifs,setNotifs]=useState((db.notifications||[]).filter(n=>n.ownerId===owner.id));
@@ -883,27 +1573,18 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
   const[showAddNozzle,setShowAddNozzle]=useState(null); // pumpId to add nozzle to
   const[nozzleF,setNozzleF]=useState({id:"",fuel:"Petrol",openReading:"",operator:"",status:"Active"});
 
-  const paySuccess=async info=>{
-    const txn={id:`TXN-${Math.floor(9000+Math.random()*999)}`,ownerId:owner.id,plan:info.plan,billing:info.billing,amount:info.amount,base:info.base,gst:info.gst,credit:info.credit,date:todayS(),method:info.method,status:"Success",razorId:info.txnId,planActivated:true};
+  const paySuccess=info=>{
+    const txn={id:`TXN-${Math.floor(9000+Math.random()*999)}`,ownerId:owner.id,plan:info.plan,billing:info.billing,amount:info.amount,base:info.base,gst:info.gst,credit:info.credit,date:todayS(),method:info.method,status:"Success",razorId:info.txnId};
     const upd={...owner,plan:info.plan,billing:info.billing,amountPaid:info.base,status:"Active",startDate:todayS(),endDate:addMo(todayS(),info.billing==="monthly"?1:12),daysUsed:0};
-    // Update local state immediately (optimistic)
     setDb(d=>({...d,transactions:[txn,...d.transactions],owners:d.owners.map(o=>o.id===owner.id?upd:o)}));
     setOwner(upd);setGw(null);flash("✓ "+info.plan+" plan activated!");setTab("billing");
-    // Sync to backend (non-blocking)
-    try{
-      if(info.razorpay_payment_id){
-        await Payments.verify(info.razorpay_order_id,info.razorpay_payment_id,info.razorpay_signature,info.txnId);
-      }
-    }catch(e){ console.warn("Payment sync to backend failed:",e.message); }
   };
 
-  const addPump=async()=>{
+  const addPump=()=>{
     if(!pumpLimit.ok){flash("⚠ Plan limit reached — upgrade to add more pumps");return;}
     if(!pumpF.name||!pumpF.shortName||!pumpF.city){flash("⚠ Fill all required fields");return;}
     const np={id:"P"+rid(),ownerId:owner.id,...pumpF,status:"Active"};
-    setDb(d=>({...d,pumps:[...d.pumps,np]})); // optimistic
-    try{ await Pumps.create({...np,owner_id:owner.id,short_name:np.shortName}); refreshData?.(); }
-    catch(e){ console.warn("Pump sync:",e.message); }
+    setDb(d=>({...d,pumps:[...d.pumps,np]}));
     flash("✓ Pump added: "+pumpF.name);setShowAddPump(false);setPumpF({name:"",shortName:"",city:"",state:"",address:"",gst:""});
   };
 
@@ -912,19 +1593,13 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
     setEditPump(pump.id);
     setEditPumpF({name:pump.name,shortName:pump.shortName,city:pump.city,state:pump.state,address:pump.address||"",gst:pump.gst||""});
   };
-  const saveEditPump=async()=>{
+  const saveEditPump=()=>{
     if(!editPumpF.name||!editPumpF.shortName){flash("⚠ Name and short name required");return;}
     setDb(d=>({...d,pumps:d.pumps.map(p=>p.id===editPump?{...p,...editPumpF}:p)}));
-    try{ await Pumps.update(editPump,{...editPumpF,short_name:editPumpF.shortName}); }
-    catch(e){ console.warn("Pump update sync:",e.message); }
     flash("✓ Pump updated");setEditPump(null);
   };
-  const togglePumpStatus=async(pumpId)=>{
-    const pump=db.pumps.find(p=>p.id===pumpId);
-    const newStatus=pump?.status==="Active"?"Inactive":"Active";
-    setDb(d=>({...d,pumps:d.pumps.map(p=>p.id===pumpId?{...p,status:newStatus}:p)}));
-    try{ await Pumps.update(pumpId,{status:newStatus}); }
-    catch(e){ console.warn("Toggle pump sync:",e.message); }
+  const togglePumpStatus=(pumpId)=>{
+    setDb(d=>({...d,pumps:d.pumps.map(p=>p.id===pumpId?{...p,status:p.status==="Active"?"Inactive":"Active"}:p)}));
     flash("Pump status updated");
   };
   const addNozzle=(pumpId)=>{
@@ -936,16 +1611,12 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
     const nn={id:nozzleF.id,ownerId:owner.id,pumpId,fuel:nozzleF.fuel,
       open:parseFloat(nozzleF.openReading),close:"",operator:nozzleF.operator||"",status:nozzleF.status};
     setDb(d=>({...d,nozzles:[...d.nozzles,nn]}));
-    try{ await Pumps.addNozzle(pumpId,{id:nn.id,fuel:nn.fuel,open_reading:nn.open,operator:nn.operator,status:nn.status}); refreshData?.(); }
-    catch(e){ console.warn("Add nozzle sync:",e.message); }
     flash("✓ Nozzle "+nozzleF.id+" added to pump");
     setNozzleF({id:"",fuel:"Petrol",openReading:"",operator:"",status:"Active"});
     setShowAddNozzle(null);
   };
-  const removeNozzle=async(nozzleId,pumpId)=>{
+  const removeNozzle=(nozzleId,pumpId)=>{
     setDb(d=>({...d,nozzles:d.nozzles.filter(n=>!(n.id===nozzleId&&n.pumpId===pumpId))}));
-    try{ await Pumps.removeNozzle(pumpId,nozzleId); }
-    catch(e){ console.warn("Remove nozzle sync:",e.message); }
     flash("Nozzle removed");
   };
   const updateNozzleReading=(nozzleId,pumpId,reading)=>{
@@ -967,8 +1638,12 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
     {div:true,k:"d2"},
     {k:"staff",icon:"👥",label:"Staff"},
     {k:"shifts",icon:"📋",label:"Shift Reports"},
+    {k:"audit",icon:"🔍",label:"Shift Audit"},
     {div:true,k:"d3"},
+    {k:"prices",icon:"💱",label:"Fuel Prices"},
+    {k:"indent",icon:"📦",label:"Indent Orders"},
     {k:"gst",icon:"🧾",label:"GST Reports"},
+    {k:"notifications",icon:"🔔",label:"Notifications"},
     {k:"settings",icon:"⚙️",label:"Settings"},
   ];
 
@@ -980,7 +1655,7 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
   </div>:null;
 
   return <div style={{minHeight:"100vh",background:C.bg,fontFamily:"'DM Mono',monospace",color:C.text}}>
-    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&amp;family=DM+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
     {gw&&<Gateway plan={gw.plan} billing={gw.billing} owner={owner} onClose={()=>setGw(null)} onSuccess={paySuccess}/>}
     {showTestForm&&<MachineTestForm nozzles={activePump?pumpNozzles:myNozzles} operators={[...myMgr,...myOp]} pumpId={activePump} ownerId={owner.id} db={db} setDb={setDb} onClose={()=>setShowTestForm(false)} flash={flash}/>}
     <Topbar icon="👤" ac={C.accent} label="Owner Portal" pump={activePump?myPumpsColored.find(p=>p.id===activePump)?.shortName:"Multi-Pump"} db={db} notifs={notifs} onMarkAll={()=>setNotifs(p=>p.map(n=>({...n,read:true})))}
@@ -1166,11 +1841,9 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
         </div>}
 
         {/* ── ANALYTICS TAB ── */}
-        {tab==="analytics"&&<div style={{display:"flex",flexDirection:"column",gap:15}}>
-          <div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:800}}>📈 Analytics{activePump?" — "+myPumpsColored.find(p=>p.id===activePump)?.shortName:""}</div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
-            {["Petrol","Diesel","CNG"].map(f=><Kpi key={f} label={f+" (7d)"} value={fmtL(pumpSales.reduce((s,d)=>s+(d[f.toLowerCase()]||0),0))} sub={fmtN(Math.round(pumpSales.reduce((s,d)=>s+(d[f.toLowerCase()]||0),0)/FUEL.rates[f]))+(f==="CNG"?" kg":" L")} accent={FUEL.colors[f]} icon="⛽"/>)}
-          </div>
+        {tab==="analytics"&&<AdvancedAnalytics db={db} ownerId={owner.id} pumps={myPumpsColored} activePump={activePump} flash={flash}/>}
+        {tab==="analytics_DISABLED_OLD"&&<div style={{display:"flex",flexDirection:"column",gap:15}}>
+          <div style={{display:"none"}}>
           <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:15}}>
             <div style={{...G.card,padding:18}}>
               <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13,marginBottom:3}}>📊 Revenue by Fuel</div>
@@ -1506,6 +2179,10 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
 
         {/* ── BILLING TAB ── */}
         {tab==="billing"&&<div style={{display:"flex",flexDirection:"column",gap:15}}>
+          {rzpOrder&&<RazorpayGateway {...rzpOrder} owner={owner}
+            onSuccess={info=>{paySuccess(info);setRzpOrder(null);}}
+            onCancel={()=>setRzpOrder(null)}
+          />}
           <div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:800}}>📜 Billing History</div>
           <div style={G.card}>
             <Tbl heads={["TXN ID","Plan","Billing","Base","GST","Total","Date","Method","Status"]}>
@@ -1525,47 +2202,176 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
         </div>}
 
         {/* ── CREDITS TAB ── */}
-        {tab==="credits"&&<div style={{display:"flex",flexDirection:"column",gap:15}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <div><div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:800}}>🤝 Credit Customers</div><div style={{fontSize:11,color:C.muted3,marginTop:2}}>{myCC.length}/{pd.creditCustomers>=999?"∞":pd.creditCustomers} used · Outstanding: {fmt(totalOutstanding)}</div></div>
-            <button onClick={()=>setShowACC(!showACC)} disabled={!checkLimit(owner,db,"creditCustomers").ok} style={{...G.btn,background:checkLimit(owner,db,"creditCustomers").ok?C.green:C.muted,color:"#000",fontWeight:700,opacity:checkLimit(owner,db,"creditCustomers").ok?1:.6}}>+ Add Customer</button>
-          </div>
-          {showACC&&<div style={{...G.card,padding:19,borderColor:"rgba(0,229,179,.3)"}}>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:11,marginBottom:13}}>
-              <div><label style={G.label}>Customer Name</label><input value={ccF.name} onChange={e=>setCcF(f=>({...f,name:e.target.value}))} style={G.input}/></div>
-              <div><label style={G.label}>Phone</label><input value={ccF.phone} onChange={e=>setCcF(f=>({...f,phone:e.target.value}))} style={G.input}/></div>
-              <div><label style={G.label}>Credit Limit (₹)</label><input type="number" value={ccF.limit} onChange={e=>setCcF(f=>({...f,limit:e.target.value}))} style={G.input}/></div>
-              <div><label style={G.label}>Pump</label><select value={ccF.pumpId} onChange={e=>setCcF(f=>({...f,pumpId:e.target.value}))} style={{...G.input,cursor:"pointer"}}><option value="">— Select —</option>{myPumps.map(p=><option key={p.id} value={p.id}>{p.shortName}</option>)}</select></div>
-            </div>
-            <button onClick={()=>{if(!ccF.name||!ccF.limit)return;const nc={id:"CC"+rid(),ownerId:owner.id,pumpId:ccF.pumpId||myPumps[0]?.id,name:ccF.name,phone:ccF.phone,limit:parseInt(ccF.limit)||0,outstanding:0,lastTxn:todayS(),status:"Active"};setDb(d=>({...d,creditCustomers:[...d.creditCustomers,nc]}));flash("✓ Customer added: "+ccF.name);setCcF({name:"",phone:"",limit:"",pumpId:""});setShowACC(false);}} style={{...G.btn,background:C.green,color:"#000",fontWeight:700}}>Add Customer →</button>
-          </div>}
-          <div style={G.card}>
-            <Tbl heads={["Name","Pump","Phone","Limit","Outstanding","Utilization","Last Txn","Status","Action"]}>
-              {myCC.map(c=>{
-                const u=Math.round(c.outstanding/c.limit*100);
-                const pump=myPumpsColored.find(p=>p.id===c.pumpId);
-                return <tr key={c.id}>
-                  <td style={{...G.td,fontWeight:600}}>{c.name}</td>
-                  <td style={{...G.td,fontSize:10,color:pump?._color||C.muted3}}>{pump?.shortName||"—"}</td>
-                  <td style={{...G.td,color:C.muted3}}>{c.phone}</td>
-                  <td style={G.td}>{fmt(c.limit)}</td>
-                  <td style={{...G.td,fontWeight:700,color:u>90?C.red:u>70?C.warn:C.text}}>{fmt(c.outstanding)}</td>
-                  <td style={G.td}><div style={{display:"flex",alignItems:"center",gap:7}}><div style={{flex:1,height:4,background:C.s3,borderRadius:2}}><div style={{height:"100%",width:u+"%",background:u>90?C.red:u>70?C.warn:C.green,borderRadius:2}}/></div><span style={{fontSize:9,color:u>90?C.red:u>70?C.warn:C.muted3}}>{u}%</span></div></td>
-                  <td style={{...G.td,color:C.muted3}}>{c.lastTxn}</td>
-                  <td style={G.td}><Sb s={c.status}/></td>
-                  <td style={G.td}>
-                    {collectState[c.id]?<div style={{display:"flex",gap:4,alignItems:"center"}}>
-                      <input type="number" id={"ci-"+c.id} defaultValue="" placeholder="₹" style={{...G.input,width:80,padding:"4px 7px",fontSize:11}}/>
-                      <button onClick={()=>{const el=document.getElementById("ci-"+c.id);const amt=parseFloat(el?.value||0);if(amt>0){setDb(d=>({...d,creditCustomers:d.creditCustomers.map(x=>x.id===c.id?{...x,outstanding:Math.max(0,x.outstanding-amt)}:x)}));flash("✓ Collected "+fmt(amt)+" from "+c.name);}setCollectState(s=>({...s,[c.id]:false}));}} style={{...G.btn,background:C.green,color:"#000",padding:"4px 8px",fontSize:10}}>✓</button>
-                      <button onClick={()=>setCollectState(s=>({...s,[c.id]:false}))} style={{...G.btn,background:C.s3,color:C.muted2,padding:"4px 8px",fontSize:10}}>✕</button>
-                    </div>:<button onClick={()=>setCollectState(s=>({...s,[c.id]:true}))} style={{...G.btn,background:C.greenDim,color:C.green,border:`1px solid rgba(0,229,179,.3)`,padding:"4px 10px",fontSize:10}}>Collect</button>}
-                  </td>
-                </tr>;
-              })}
-            </Tbl>
-          </div>
-        </div>}
+        {tab==="credits"&&(()=>{
+  const[ccMode,setCcMode]=useState("list"); // list | add | edit | txn
+  const[selCC,setSelCC]=useState(null);
+  const[ccF,setCcF2]=useState({name:"",phone:"",limit:"",pumpId:"",notes:""});
+  const[txnF,setTxnF]=useState({type:"sale",amount:"",desc:"",date:todayS()});
+  const[filter,setFilter]=useState("all");
 
+  const myCC=db.creditCustomers.filter(c=>c.ownerId===owner.id);
+  const filtCC=filter==="all"?myCC:filter==="high"?myCC.filter(c=>c.outstanding/c.limit>.7):myCC.filter(c=>c.status===filter);
+  const totalOut=myCC.reduce((s,c)=>s+c.outstanding,0);
+  const totalLimit=myCC.reduce((s,c)=>s+c.limit,0);
+  const ccTxns=db.creditTxns||[];
+
+  const saveCC=()=>{
+    if(!ccF.name||!ccF.limit)return;
+    if(ccMode==="add"){
+      const nc={id:"CC"+rid(),ownerId:owner.id,pumpId:ccF.pumpId||myPumps[0]?.id,name:ccF.name,phone:ccF.phone,limit:parseInt(ccF.limit)||0,outstanding:0,lastTxn:todayS(),status:"Active",notes:ccF.notes,txns:[]};
+      setDb(d=>({...d,creditCustomers:[...d.creditCustomers,nc]}));
+      flash("✓ Credit customer added: "+ccF.name);
+    } else {
+      setDb(d=>({...d,creditCustomers:d.creditCustomers.map(x=>x.id===selCC.id?{...x,name:ccF.name,phone:ccF.phone,limit:parseInt(ccF.limit)||x.limit,pumpId:ccF.pumpId||x.pumpId,notes:ccF.notes}:x)}));
+      flash("✓ "+ccF.name+" updated");
+    }
+    setCcMode("list");setCcF2({name:"",phone:"",limit:"",pumpId:"",notes:""});setSelCC(null);
+  };
+  const deleteCC=id=>{
+    if(!window.confirm("Delete this credit customer?"))return;
+    setDb(d=>({...d,creditCustomers:d.creditCustomers.filter(x=>x.id!==id)}));
+    flash("✓ Customer deleted");
+  };
+  const addTxn=()=>{
+    const amt=parseFloat(txnF.amount)||0;
+    if(!amt||!selCC)return;
+    const txn={id:"CTX"+rid(),customerId:selCC.id,type:txnF.type,amount:amt,desc:txnF.desc||txnF.type,date:txnF.date,time:new Date().toLocaleTimeString()};
+    const newOut=txnF.type==="sale"?selCC.outstanding+amt:Math.max(0,selCC.outstanding-amt);
+    setDb(d=>({...d,
+      creditCustomers:d.creditCustomers.map(x=>x.id===selCC.id?{...x,outstanding:newOut,lastTxn:txnF.date}:x),
+      creditTxns:[...(d.creditTxns||[]),txn]
+    }));
+    flash(`✓ ${txnF.type==="sale"?"Sale":"Payment"} of ${fmt(amt)} recorded for ${selCC.name}`);
+    setTxnF({type:"sale",amount:"",desc:"",date:todayS()});
+    setSelCC(cc=>cc?{...cc,outstanding:newOut}:null);
+  };
+  const startEdit=cc=>{setCcMode("edit");setSelCC(cc);setCcF2({name:cc.name,phone:cc.phone||"",limit:String(cc.limit),pumpId:cc.pumpId||"",notes:cc.notes||""});};
+
+  return <div style={{display:"flex",flexDirection:"column",gap:15}}>
+    {/* Header + KPIs */}
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10}}>
+      <div>
+        <div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:800}}>🤝 Credit Customers</div>
+        <div style={{fontSize:11,color:C.muted3,marginTop:2}}>{myCC.length}/{pd.creditCustomers>=999?"∞":pd.creditCustomers} used · ₹{totalOut.toLocaleString()} outstanding of ₹{totalLimit.toLocaleString()} total limit</div>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        {ccMode!=="add"&&<button onClick={()=>{setCcMode("add");setSelCC(null);setCcF2({name:"",phone:"",limit:"",pumpId:"",notes:""});}} disabled={!checkLimit(owner,db,"creditCustomers").ok} style={{...G.btn,background:checkLimit(owner,db,"creditCustomers").ok?C.green:C.muted,color:"#000",fontWeight:700,opacity:checkLimit(owner,db,"creditCustomers").ok?1:.6}}>+ New Customer</button>}
+        {(ccMode==="add"||ccMode==="edit")&&<button onClick={()=>{setCcMode("list");setSelCC(null);}} style={{...G.btn,background:C.s2,color:C.muted2,border:`1px solid ${C.border}`}}>✕ Cancel</button>}
+      </div>
+    </div>
+    {/* Summary KPIs */}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+      <Kpi label="Total Customers" value={myCC.length} accent={C.blue} icon="👥"/>
+      <Kpi label="Total Outstanding" value={fmtL(totalOut)} sub={`of ${fmtL(totalLimit)} limit`} accent={totalOut/totalLimit>.8?C.red:totalOut/totalLimit>.5?C.warn:C.green} icon="💰"/>
+      <Kpi label="High Risk (>70%)" value={myCC.filter(c=>c.outstanding/c.limit>.7).length} accent={C.warn} icon="⚠️"/>
+      <Kpi label="Active" value={myCC.filter(c=>c.status==="Active").length} accent={C.green} icon="✅"/>
+    </div>
+    {/* Add / Edit form */}
+    {(ccMode==="add"||ccMode==="edit")&&<div style={{...G.card,padding:20,borderColor:ccMode==="add"?"rgba(0,229,179,.35)":"rgba(167,139,250,.35)"}}>
+      <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:14,marginBottom:16,color:ccMode==="add"?C.green:C.purple}}>{ccMode==="add"?"➕ New Credit Customer":"✏️ Edit: "+selCC?.name}</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:12}}>
+        <div><label style={G.label}>Full Name *</label><input value={ccF.name} onChange={e=>setCcF2(f=>({...f,name:e.target.value}))} style={G.input} placeholder="Patel Trucks Ltd"/></div>
+        <div><label style={G.label}>Phone</label><input value={ccF.phone} onChange={e=>setCcF2(f=>({...f,phone:e.target.value}))} style={G.input} placeholder="+91 98765 43210"/></div>
+        <div><label style={G.label}>Credit Limit (₹) *</label><input type="number" value={ccF.limit} onChange={e=>setCcF2(f=>({...f,limit:e.target.value}))} style={G.input} placeholder="50000"/></div>
+        <div><label style={G.label}>Pump</label><select value={ccF.pumpId} onChange={e=>setCcF2(f=>({...f,pumpId:e.target.value}))} style={{...G.input,cursor:"pointer"}}><option value="">— Select Pump —</option>{myPumps.map(p=><option key={p.id} value={p.id}>{p.shortName}</option>)}</select></div>
+        <div style={{gridColumn:"2/-1"}}><label style={G.label}>Notes</label><input value={ccF.notes} onChange={e=>setCcF2(f=>({...f,notes:e.target.value}))} style={G.input} placeholder="Vehicle fleet, payment terms, contact notes..."/></div>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={saveCC} style={{...G.btn,background:ccMode==="add"?C.green:C.purple,color:"#000",fontWeight:700}}>{ccMode==="add"?"Add Customer →":"Save Changes →"}</button>
+      </div>
+    </div>}
+    {/* Transaction panel for selected customer */}
+    {ccMode==="txn"&&selCC&&<div style={{...G.card,padding:20,borderColor:"rgba(6,182,212,.35)"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div>
+          <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:14,color:C.teal}}>💳 Transactions — {selCC.name}</div>
+          <div style={{fontSize:10,color:C.muted3,marginTop:2}}>Outstanding: <span style={{fontWeight:700,color:selCC.outstanding/selCC.limit>.9?C.red:C.text}}>₹{selCC.outstanding.toLocaleString()}</span> of ₹{selCC.limit.toLocaleString()} limit</div>
+        </div>
+        <button onClick={()=>{setCcMode("list");setSelCC(null);}} style={{...G.btn,background:C.s2,color:C.muted2,border:`1px solid ${C.border}`,padding:"5px 11px",fontSize:10}}>✕ Close</button>
+      </div>
+      {/* Add txn form */}
+      <div style={{background:C.s2,borderRadius:10,padding:14,marginBottom:14}}>
+        <div style={{fontWeight:700,fontSize:11,marginBottom:10,color:C.muted3}}>Record Transaction</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:10}}>
+          <div><label style={G.label}>Type</label>
+            <div style={{display:"flex",gap:6}}>
+              {[["sale","Sale","↑",C.red],["payment","Payment","↓",C.green]].map(([t,l,ic,c])=>(
+                <div key={t} onClick={()=>setTxnF(f=>({...f,type:t}))} style={{flex:1,padding:"7px",borderRadius:7,border:`1px solid ${txnF.type===t?c:C.border}`,background:txnF.type===t?c+"18":"transparent",cursor:"pointer",textAlign:"center",fontSize:10,fontWeight:700,color:txnF.type===t?c:C.muted3}}>{ic} {l}</div>
+              ))}
+            </div>
+          </div>
+          <div><label style={G.label}>Amount (₹)</label><input type="number" value={txnF.amount} onChange={e=>setTxnF(f=>({...f,amount:e.target.value}))} style={G.input} placeholder="5000"/></div>
+          <div><label style={G.label}>Date</label><input type="date" value={txnF.date} onChange={e=>setTxnF(f=>({...f,date:e.target.value}))} style={G.input}/></div>
+          <div><label style={G.label}>Description</label><input value={txnF.desc} onChange={e=>setTxnF(f=>({...f,desc:e.target.value}))} style={G.input} placeholder="Diesel fill, cash collected..."/></div>
+        </div>
+        <button onClick={addTxn} style={{...G.btn,background:txnF.type==="sale"?C.red:C.green,color:"#fff",fontWeight:700}}>
+          {txnF.type==="sale"?"↑ Add Sale":"↓ Record Payment"}
+        </button>
+      </div>
+      {/* Transaction history */}
+      <div style={{fontWeight:700,fontSize:11,color:C.muted3,marginBottom:8}}>Transaction History</div>
+      {ccTxns.filter(t=>t.customerId===selCC.id).length===0&&<div style={{padding:"16px",textAlign:"center",color:C.muted3,fontSize:11}}>No transactions yet</div>}
+      <div style={{display:"flex",flexDirection:"column",gap:5,maxHeight:240,overflowY:"auto"}}>
+        {ccTxns.filter(t=>t.customerId===selCC.id).slice().reverse().map(t=>(
+          <div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 12px",background:C.s2,borderRadius:8,borderLeft:`3px solid ${t.type==="sale"?C.red:C.green}`}}>
+            <div><div style={{fontSize:11,fontWeight:600,color:t.type==="sale"?C.red:C.green}}>{t.type==="sale"?"↑":"↓"} {t.desc||t.type}</div><div style={{fontSize:9,color:C.muted3}}>{t.date} · {t.time}</div></div>
+            <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:13,color:t.type==="sale"?C.red:C.green}}>{t.type==="sale"?"+":"-"}₹{t.amount.toLocaleString()}</div>
+          </div>
+        ))}
+      </div>
+    </div>}
+    {/* Filter bar */}
+    {ccMode==="list"&&<div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+      {[["all","All"],["Active","Active"],["Inactive","Inactive"],["high","High Risk"]].map(([f,l])=>(
+        <div key={f} onClick={()=>setFilter(f)} style={{padding:"4px 12px",borderRadius:20,cursor:"pointer",border:`1px solid ${filter===f?C.blue:C.border}`,background:filter===f?C.blueDim:"transparent",color:filter===f?C.blue:C.muted3,fontSize:10,fontWeight:700}}>{l}</div>
+      ))}
+    </div>}
+    {/* Customer table */}
+    {ccMode==="list"&&<div style={G.card}>
+      {filtCC.length===0&&<div style={{padding:28,textAlign:"center",color:C.muted3,fontSize:12}}>No customers found. Add your first credit customer above.</div>}
+      {filtCC.length>0&&<table style={{width:"100%",borderCollapse:"collapse"}}>
+        <thead><tr>
+          <th style={G.th}>Customer</th><th style={G.th}>Pump</th><th style={G.th}>Limit</th>
+          <th style={G.th}>Outstanding</th><th style={G.th}>Utilization</th><th style={G.th}>Last Txn</th>
+          <th style={G.th}>Status</th><th style={G.th}>Actions</th>
+        </tr></thead>
+        <tbody>{filtCC.map(cc=>{
+          const u=cc.limit>0?Math.round(cc.outstanding/cc.limit*100):0;
+          const uc=u>90?C.red:u>70?C.warn:C.green;
+          const pump=myPumpsColored.find(p=>p.id===cc.pumpId);
+          return <tr key={cc.id}>
+            <td style={{...G.td,fontWeight:600}}>
+              <div>{cc.name}</div>
+              {cc.phone&&<div style={{fontSize:9,color:C.muted3,marginTop:1}}>{cc.phone}</div>}
+              {cc.notes&&<div style={{fontSize:9,color:C.muted,marginTop:1,maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{cc.notes}</div>}
+            </td>
+            <td style={{...G.td,fontSize:10,color:pump?._color||C.muted3,fontWeight:600}}>{pump?.shortName||"—"}</td>
+            <td style={G.td}>{fmt(cc.limit)}</td>
+            <td style={{...G.td,fontWeight:700,color:uc}}>{fmt(cc.outstanding)}</td>
+            <td style={G.td}>
+              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                <div style={{flex:1,height:5,background:C.s3,borderRadius:3,minWidth:60}}>
+                  <div style={{height:"100%",width:Math.min(u,100)+"%",background:uc,borderRadius:3,transition:"width .3s"}}/>
+                </div>
+                <span style={{fontSize:9,color:uc,fontWeight:700,minWidth:28}}>{u}%</span>
+              </div>
+            </td>
+            <td style={{...G.td,color:C.muted3,fontSize:10}}>{cc.lastTxn}</td>
+            <td style={G.td}><Sb s={cc.status}/></td>
+            <td style={G.td}>
+              <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                <button onClick={()=>{setCcMode("txn");setSelCC(cc);}} style={{...G.btn,background:C.tealDim,color:C.teal,border:`1px solid rgba(6,182,212,.3)`,padding:"4px 9px",fontSize:9}}>💳 Txns</button>
+                <button onClick={()=>startEdit(cc)} style={{...G.btn,background:C.purpleDim,color:C.purple,border:`1px solid rgba(167,139,250,.3)`,padding:"4px 9px",fontSize:9}}>✏️</button>
+                <button onClick={()=>{setDb(d=>({...d,creditCustomers:d.creditCustomers.map(x=>x.id===cc.id?{...x,status:x.status==="Active"?"Inactive":"Active"}:x)}));flash("Status toggled");}} style={{...G.btn,background:C.s2,color:C.muted2,border:`1px solid ${C.border}`,padding:"4px 9px",fontSize:9}}>{cc.status==="Active"?"Pause":"Resume"}</button>
+                <button onClick={()=>deleteCC(cc.id)} style={{...G.btn,background:C.redDim,color:C.red,border:`1px solid rgba(244,63,94,.3)`,padding:"4px 9px",fontSize:9}}>🗑</button>
+              </div>
+            </td>
+          </tr>;
+        })}</tbody>
+      </table>}
+    </div>}
+  </div>;
+})()}
         {/* ── STAFF TAB ── */}
         {tab==="staff"&&<div style={{display:"flex",flexDirection:"column",gap:15}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -1646,7 +2452,10 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
         </div>}
 
         {/* ── SHIFTS TAB ── */}
-        {tab==="shifts"&&<div style={{display:"flex",flexDirection:"column",gap:15}}>
+        {tab==="shifts"&&(()=>{
+          const[shiftPdf,setShiftPdf]=useState(null);
+          return <div style={{display:"flex",flexDirection:"column",gap:15}}>
+          {shiftPdf&&<PDFExportModal type={"Shift Report — "+shiftPdf.shift+" "+shiftPdf.date} data={buildShiftPDF(shiftPdf,(db.nozzleReadings||[]).filter(r=>r.pumpId===shiftPdf.pumpId&&r.date===shiftPdf.date&&r.shift===shiftPdf.shift),myPumps)} onClose={()=>setShiftPdf(null)}/>}
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
             <div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:800}}>📋 Shift Reports</div>
             <div style={{display:"flex",gap:8,alignItems:"center"}}>
@@ -1671,11 +2480,18 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
             showPump={!activePump}
             pumps={myPumpsColored}
           />
-        </div>}
+        </div>;
+        })()
+        }
 
         {/* ── GST TAB ── */}
-        {tab==="gst"&&<div style={{display:"flex",flexDirection:"column",gap:15}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:800}}>🧾 GST Reports</div><div style={{display:"flex",gap:8}}><button style={{...G.btn,background:C.s2,color:C.muted2,border:`1px solid ${C.border}`,padding:"7px 13px"}}>⬇ GSTR-1</button><button style={{...G.btn,background:C.blue,color:"#fff",padding:"7px 13px"}}>⬇ PDF</button></div></div>
+        {tab==="gst"&&(()=>{
+          const[gstPdf,setGstPdf]=useState(false);
+          const period="February 2025";
+          const gstSales=mySales.filter(s=>s.ownerId===owner.id);
+          return <div style={{display:"flex",flexDirection:"column",gap:15}}>
+          {gstPdf&&<PDFExportModal type="GST Report" data={buildGSTPDF(gstSales,myPumps,owner,period)} onClose={()=>setGstPdf(false)}/>}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:800}}>🧾 GST Reports</div><div style={{display:"flex",gap:8}}><button onClick={()=>setGstPdf(true)} style={{...G.btn,background:C.blue,color:"#fff",padding:"7px 13px"}}>📄 Export GST PDF</button></div></div>
           {/* Pump selector for GST */}
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
             <div onClick={()=>setActivePump(null)} style={{padding:"5px 12px",borderRadius:8,cursor:"pointer",border:`1px solid ${activePump===null?C.accent:C.border}`,background:activePump===null?C.accentDim:"transparent",color:activePump===null?C.accent:C.muted3,fontSize:10,fontWeight:700}}>All Pumps (Consolidated)</div>
@@ -1706,7 +2522,9 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
               </Tbl>
             </div>;
           })()}
-        </div>}
+        </div>;
+        })()
+        }
 
         {/* ── SETTINGS TAB ── */}
         {tab==="settings"&&<div style={{display:"flex",flexDirection:"column",gap:15}}>
@@ -1725,6 +2543,20 @@ const OwnerDash=({owner,setOwner,db,setDb,onLogout,refreshData})=>{
             </div>
           </div>
         </div>}
+
+        {/* ── NEW v7: ANALYTICS (enhanced) ── */}
+
+        {/* ── NEW v7: FUEL PRICES ── */}
+        {tab==="prices"&&<FuelPriceManager db={db} setDb={setDb} ownerId={owner.id} flash={flash}/>}
+
+        {/* ── NEW v7: INDENT ORDERS ── */}
+        {tab==="indent"&&<IndentSystem db={db} setDb={setDb} ownerId={owner.id} flash={flash}/>}
+
+        {/* ── NEW v7: SHIFT AUDIT ── */}
+        {tab==="audit"&&<ShiftAuditPanel db={db} setDb={setDb} ownerId={owner.id} flash={flash}/>}
+
+        {/* ── NEW v7: NOTIFICATIONS ── */}
+        {tab==="notifications"&&<NotificationCentre db={db} setDb={setDb} owner={owner} flash={flash}/>}
 
       </div>
     </div>
@@ -2014,7 +2846,7 @@ const ShiftReportFilter=({reports,nozzleReadings,nozzles,title,showPump=false,pu
 // ═══════════════════════════════════════════════════════════
 // MANAGER DASHBOARD — Full shift-wise operations
 // ═══════════════════════════════════════════════════════════
-const ManagerDash=({manager,db,setDb,onLogout,refreshData})=>{
+const ManagerDash=({manager,db,setDb,onLogout})=>{
   const[tab,setTab]=useState("operations");
   const[msg,setMsg]=useState("");
   const flash=t=>{setMsg(t);setTimeout(()=>setMsg(""),4000);};
@@ -2086,7 +2918,7 @@ const ManagerDash=({manager,db,setDb,onLogout,refreshData})=>{
   const todayTests=myTests.filter(t=>t.date===todayS());
   const pendingTests=myNozzles.filter(n=>getNozzleTestStatus(myTests,n.id,manager.pumpId,todayS())==="pending").length;
 
-  const submitShift=async()=>{
+  const submitShift=()=>{
     if(!allCloseFilled){flash("⚠ Please enter close readings for all nozzles");return;}
     const newNozzleReadings=nozzleCalcs.map(c=>({
       id:`NR-${manager.pumpId}-${c.nozzle.id}-${activeDate}-${activeShift.name}-${rid()}`,
@@ -2119,12 +2951,14 @@ const ManagerDash=({manager,db,setDb,onLogout,refreshData})=>{
       readings:nrIds,
     };
 
+    // Update nozzle open readings to close readings (for next shift auto-population)
     const updatedNozzles=db.nozzles.map(n=>{
       const match=nozzleCalcs.find(c=>c.nozzle.id===n.id&&n.pumpId===manager.pumpId);
       if(!match||isNaN(match.closeR))return n;
       return{...n,open:match.closeR,close:""};
     });
 
+    // Update sales
     const newSales={date:activeDate,pumpId:manager.pumpId,ownerId:manager.ownerId,
       petrol:nozzleCalcs.filter(c=>c.nozzle.fuel==="Petrol").reduce((s,c)=>s+(c.revenue||0),0),
       diesel:nozzleCalcs.filter(c=>c.nozzle.fuel==="Diesel").reduce((s,c)=>s+(c.revenue||0),0),
@@ -2137,39 +2971,13 @@ const ManagerDash=({manager,db,setDb,onLogout,refreshData})=>{
         cng:(db.sales.find(s=>s.pumpId===manager.pumpId&&s.date===activeDate)?.cng||0)+newSales.cng,
       }];
 
-    // Optimistic update
     setDb(d=>({...d,
       nozzleReadings:[...d.nozzleReadings,...newNozzleReadings],
       shiftReports:[shiftReport,...d.shiftReports],
       nozzles:updatedNozzles,
       sales:salesUpdated,
     }));
-
-    // Sync to backend
-    try{
-      await Shifts.submit({
-        pump_id:manager.pumpId,
-        date:activeDate,
-        shift:activeShift.name,
-        shift_index:activeShift.index,
-        manager:manager.name,
-        cash:Math.round(cashSum),
-        card:Math.round(cardSum),
-        upi:Math.round(upiSum),
-        credit_out:Math.round(creditSum),
-        nozzle_readings:newNozzleReadings.map(r=>({
-          nozzleId:r.nozzleId,fuel:r.fuel,
-          openReading:r.openReading,closeReading:r.closeReading,
-          testVol:r.testVol,netVol:r.netVol,saleVol:r.saleVol,
-          revenue:r.revenue,rate:r.rate,operator:r.operator,
-        })),
-      });
-      refreshData?.(); // reload shifts + sales from backend
-      flash("✅ "+activeShift.name+" shift saved to backend! Readings rolled over.");
-    }catch(e){
-      console.warn("Shift backend sync:",e.message);
-      flash("✅ "+activeShift.name+" shift submitted! (offline — will sync later)");
-    }
+    flash("✅ "+activeShift.name+" shift submitted! Nozzle readings rolled over.");
     setTab("history");
   };
 
@@ -2184,7 +2992,7 @@ const ManagerDash=({manager,db,setDb,onLogout,refreshData})=>{
   ];
 
   return <div style={{minHeight:"100vh",background:C.bg,fontFamily:"'DM Mono',monospace",color:C.text}}>
-    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&amp;family=DM+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
     {showTestForm&&<MachineTestForm nozzles={myNozzles} operators={myOps} pumpId={manager.pumpId} ownerId={manager.ownerId} db={db} setDb={setDb} onClose={()=>setShowTestForm(false)} flash={flash}/>}
     <Topbar icon="🗂" ac={C.blue} label={`Manager · ${myPump?.shortName||"—"}`} pump={myPump?.name} db={null} notifs={null}
       right={<div style={{display:"flex",gap:8,alignItems:"center"}}>
@@ -2311,7 +3119,7 @@ const ManagerDash=({manager,db,setDb,onLogout,refreshData})=>{
 
         {/* ─── CASH & PAYMENTS TAB ─── */}
         {tab==="cashcoll"&&<div style={{display:"flex",flexDirection:"column",gap:15}}>
-          <div style={{fontFamily:"'Syne',sans-serif",fontSize:22,fontWeight:800}}>💰 Cash &amp; Payments — {activeShift.name}</div>
+          <div style={{fontFamily:"'Syne',sans-serif",fontSize:22,fontWeight:800}}>💰 Cash & Payments — {activeShift.name}</div>
           {myNozzles.map(n=>{
             const key=n.pumpId+n.id;
             const calc=nozzleCalcs.find(c=>c.key===key);
@@ -2425,7 +3233,7 @@ const ManagerDash=({manager,db,setDb,onLogout,refreshData})=>{
 // ═══════════════════════════════════════════════════════════
 // OPERATOR DASHBOARD — Nozzle-scoped, shift-aware
 // ═══════════════════════════════════════════════════════════
-const OperatorDash=({operator,db,setDb,onLogout,refreshData})=>{
+const OperatorDash=({operator,db,setDb,onLogout})=>{
   const[tab,setTab]=useState("operations");
   const[msg,setMsg]=useState("");
   const flash=t=>{setMsg(t);setTimeout(()=>setMsg(""),4000);};
@@ -2474,7 +3282,7 @@ const OperatorDash=({operator,db,setDb,onLogout,refreshData})=>{
   ];
 
   return <div style={{minHeight:"100vh",background:C.bg,fontFamily:"'DM Mono',monospace",color:C.text}}>
-    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&amp;family=DM+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
     {showTestForm&&<MachineTestForm nozzles={myNozzles} operators={[operator]} pumpId={operator.pumpId} ownerId={operator.ownerId} db={db} setDb={setDb} onClose={()=>setShowTestForm(false)} flash={flash}/>}
     <Topbar icon="⛽" ac={C.green} label={`Operator · ${myPump?.shortName||"—"}`} pump={myPump?.name} db={null} notifs={null}
       right={<div style={{display:"flex",gap:8,alignItems:"center"}}>
@@ -2613,26 +3421,10 @@ const FlowStep=({n,text})=><div style={{display:"flex",gap:9,alignItems:"flex-st
   <span style={{fontSize:10,color:C.muted3,lineHeight:1.5}}>{text}</span>
 </div>;
 
-const AdminDash=({onLogout,db,setDb,refreshData})=>{
+const AdminDash=({onLogout,db,setDb})=>{
   const[tab,setTab]=useState("overview");
   const[msg,setMsg]=useState("");
   const flash=t=>{setMsg(t);setTimeout(()=>setMsg(""),4000);};
-
-  // Backend connection status
-  const[backendStatus,setBackendStatus]=useState({checking:true,ok:false,db:false,latency:null,version:null,error:null});
-
-  // Load real admin data from backend on mount
-  useEffect(()=>{
-    refreshData?.();
-  },[]);
-
-  useEffect(()=>{
-    const t=Date.now();
-    fetch((import.meta.env.VITE_API_URL||'https://fuelos-backend.onrender.com')+'/api/health')
-      .then(r=>r.json())
-      .then(d=>setBackendStatus({checking:false,ok:true,db:true,latency:Date.now()-t,version:d.version,error:null}))
-      .catch(e=>setBackendStatus({checking:false,ok:false,db:false,latency:null,version:null,error:e.message}));
-  },[]);
 
   // Integration configs
   const[rzp,setRzp]=useState({liveKeyId:"rzp_live_XXXXXXXXXX",liveSecret:"",testKeyId:"rzp_test_MockKey123",testSecret:"",webhookSecret:"",mode:"test",autoCapture:true,sendReceipt:true,currency:"INR",saved:false});
@@ -2680,30 +3472,20 @@ const AdminDash=({onLogout,db,setDb,refreshData})=>{
   const integCount=[rzp.saved,wa.saved,eml.saved,sms.saved].filter(Boolean).length;
 
   // Actions
-  const forceChangePlan=async(ownerId,plan)=>{
+  const forceChangePlan=(ownerId,plan)=>{
     setDb(d=>({...d,
       owners:d.owners.map(o=>o.id===ownerId?{...o,plan,status:"Active",startDate:todayS(),endDate:addMo(todayS(),1),daysUsed:0}:o),
       auditLog:[{id:"AL"+rid(),user:"admin@fuelos.in",role:"Admin",action:`Force plan → ${plan} for ${db.owners.find(o=>o.id===ownerId)?.name}`,time:todayS()+" "+new Date().toTimeString().slice(0,5),ip:"127.0.0.1"},...(d.auditLog||[])],
     }));
-    try{
-      await Admin.updateOwner(ownerId,{plan});
-      const fresh=await Admin.owners().catch(()=>null);
-      if(fresh) setDb(d=>({...d,owners:fresh}));
-    }catch(e){ console.warn("Plan change sync:",e.message); }
     setPlanDropdown(null);flash("✓ Plan changed to "+plan+" — limits enforced immediately");
   };
-  const retryTxn=async(txnId)=>{
+  const retryTxn=(txnId)=>{
     const txn=db.transactions.find(t=>t.id===txnId);
     if(!txn)return;
     setDb(d=>({...d,
       transactions:d.transactions.map(t=>t.id===txnId?{...t,status:"Success",planActivated:true}:t),
       owners:d.owners.map(o=>o.id===txn.ownerId?{...o,plan:txn.plan,status:"Active",startDate:todayS(),endDate:addMo(todayS(),1)}:o),
     }));
-    try{
-      await Admin.retryTransaction(txnId);
-      const [freshOwners,freshTxns]=await Promise.all([Admin.owners().catch(()=>null),Admin.transactions().catch(()=>null)]);
-      setDb(d=>({...d,...(freshOwners?{owners:freshOwners}:{}), ...(freshTxns?{transactions:freshTxns}:{})}));
-    }catch(e){ console.warn("Retry txn sync:",e.message); }
     flash("✓ Retried — plan "+txn.plan+" activated for owner");
   };
   const toggleOwner=(ownerId)=>{
@@ -2750,7 +3532,7 @@ const AdminDash=({onLogout,db,setDb,refreshData})=>{
   </div>;
 
   return <div style={{minHeight:"100vh",background:C.bg,fontFamily:"'DM Mono',monospace",color:C.text}}>
-    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&amp;family=DM+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
     <Topbar icon="🛡" ac={C.purple} label="Admin · FuelOS Platform" db={db}
       right={<div style={{display:"flex",gap:10,alignItems:"center"}}>
         {msg&&<div style={{fontSize:11,color:C.green,background:"rgba(0,229,179,.08)",border:"1px solid rgba(0,229,179,.2)",borderRadius:7,padding:"5px 11px"}}>{msg}</div>}
@@ -3017,64 +3799,13 @@ const AdminDash=({onLogout,db,setDb,refreshData})=>{
 {/* ── INTEGRATIONS ── */}
 {tab==="integrations"&&<div style={{display:"flex",flexDirection:"column",gap:16}}>
   <H icon="🔌" title="Integration Configuration" sub="API keys, webhooks, and message templates for all external services"/>
-
-  {/* ── BACKEND STATUS PANEL ── */}
-  <div style={{...G.card,padding:20}}>
-    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-      <div style={{display:"flex",alignItems:"center",gap:10}}>
-        <div style={{width:38,height:38,borderRadius:10,background:backendStatus.ok?C.greenDim:backendStatus.checking?"rgba(75,141,248,.1)":C.redDim,display:"grid",placeItems:"center",fontSize:18}}>
-          {backendStatus.checking?"⏳":backendStatus.ok?"✅":"❌"}
-        </div>
-        <div>
-          <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:15}}>Backend Connection Status</div>
-          <div style={{fontSize:10,color:C.muted3}}>Render.com API · SQLite Database</div>
-        </div>
-      </div>
-      <button onClick={()=>{
-        setBackendStatus(s=>({...s,checking:true}));
-        const t=Date.now();
-        fetch((import.meta.env.VITE_API_URL||'https://fuelos-backend.onrender.com')+'/api/health')
-          .then(r=>r.json())
-          .then(d=>setBackendStatus({checking:false,ok:true,db:true,latency:Date.now()-t,version:d.version,error:null}))
-          .catch(e=>setBackendStatus({checking:false,ok:false,db:false,latency:null,version:null,error:e.message}));
-      }} style={{...G.btn,background:C.s3,color:C.text,fontSize:11}}>↻ Recheck</button>
-    </div>
-    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
-      {[
-        {label:"API Server",ok:backendStatus.ok,val:backendStatus.ok?"Online":backendStatus.checking?"Checking…":"Offline",icon:"🌐",color:backendStatus.ok?C.green:backendStatus.checking?C.blue:C.red},
-        {label:"Database",ok:backendStatus.db,val:backendStatus.db?"SQLite Ready":backendStatus.checking?"Checking…":"Error",icon:"🗄️",color:backendStatus.db?C.green:backendStatus.checking?C.blue:C.red},
-        {label:"Response Time",ok:backendStatus.latency!=null,val:backendStatus.latency?backendStatus.latency+"ms":backendStatus.checking?"Checking…":"—",icon:"⚡",color:backendStatus.latency<500?C.green:backendStatus.latency<2000?C.warn:C.red},
-        {label:"Version",ok:!!backendStatus.version,val:backendStatus.version?"v"+backendStatus.version:backendStatus.checking?"Checking…":"Unknown",icon:"🏷️",color:C.blue},
-      ].map(s=><div key={s.label} style={{background:C.s2,borderRadius:10,padding:"12px 14px",border:`1px solid ${C.border}`}}>
-        <div style={{fontSize:18,marginBottom:6}}>{s.icon}</div>
-        <div style={{fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:C.muted,marginBottom:4}}>{s.label}</div>
-        <div style={{fontSize:13,fontWeight:700,color:s.color}}>{s.val}</div>
-      </div>)}
-    </div>
-    {backendStatus.error&&<div style={{marginTop:12,padding:"10px 14px",background:C.redDim,borderRadius:8,fontSize:11,color:C.red}}>
-      ⚠ Error: {backendStatus.error}
-    </div>}
-    {backendStatus.ok&&<div style={{marginTop:12,padding:"10px 14px",background:C.greenDim,borderRadius:8,fontSize:11,color:C.green,display:"flex",gap:8,alignItems:"center"}}>
-      ✓ Backend is live · All API routes active · Data saves to Render SQLite (/tmp/fuelos.db)
-    </div>}
-  </div>
-
-  {/* ── INTEGRATION STATUS SUMMARY ── */}
   <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
-    {[
-      {label:"Razorpay",ok:rzp.saved,icon:"💳",val:rzp.saved?(rzp.mode==="live"?"Live Mode":"Test Mode"):"Not Configured",color:rzp.saved?C.blue:C.muted},
-      {label:"WhatsApp",ok:wa.saved,icon:"💬",val:wa.saved?(wa.provider||"Meta API"):"Not Configured",color:wa.saved?C.green:C.muted},
-      {label:"Email/SMTP",ok:eml.saved,icon:"📧",val:eml.saved?(eml.host||"SMTP"):"Not Configured",color:eml.saved?C.purple:C.muted},
-      {label:"SMS",ok:sms.saved,icon:"📱",val:sms.saved?(sms.provider||"MSG91"):"Not Configured",color:sms.saved?C.accent:C.muted},
-    ].map(s=><div key={s.label} style={{background:C.s2,borderRadius:10,padding:"12px 14px",border:`1px solid ${s.ok?s.color+"44":C.border}`,cursor:"pointer"}} onClick={()=>setIntegTab(s.label.toLowerCase().replace("/smtp","").replace(" ",""))}>
-      <div style={{fontSize:20,marginBottom:5}}>{s.icon}</div>
-      <div style={{fontSize:11,fontWeight:700,color:s.ok?s.color:C.muted3,marginBottom:4}}>{s.label}</div>
-      <div style={{fontSize:10,color:C.muted2,marginBottom:6}}>{s.val}</div>
-      <span style={{...G.badge,background:s.ok?`${s.color}18`:"rgba(62,78,106,.4)",color:s.ok?s.color:C.muted,fontSize:9}}>{s.ok?"✓ Connected":"○ Not set"}</span>
+    {[{k:"razorpay",n:"Razorpay",icon:"💳",ok:rzp.saved,c:C.blue},{k:"whatsapp",n:"WhatsApp",icon:"💬",ok:wa.saved,c:C.green},{k:"email",n:"Email/SMTP",icon:"📧",ok:eml.saved,c:C.purple},{k:"sms",n:"SMS API",icon:"📱",ok:sms.saved,c:C.accent}].map(s=><div key={s.k} onClick={()=>setIntegTab(s.k)} style={{...G.card,padding:14,borderTop:`3px solid ${s.ok?s.c:C.muted}`,cursor:"pointer",opacity:integTab===s.k?1:.7,transition:"all .15s",boxShadow:integTab===s.k?`0 0 0 1px ${s.c}40`:undefined}}>
+      <div style={{fontSize:22,marginBottom:5}}>{s.icon}</div>
+      <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:12,color:s.ok?s.c:C.muted3,marginBottom:5}}>{s.n}</div>
+      <IntegBadge saved={s.ok} mode={s.k==="razorpay"?rzp.mode:undefined}/>
     </div>)}
   </div>
-
-
 
   {/* RAZORPAY */}
   {integTab==="razorpay"&&<div style={{...G.card}}>
@@ -3132,8 +3863,8 @@ const AdminDash=({onLogout,db,setDb,refreshData})=>{
         <button onClick={testRzpConn} disabled={testingRzp} style={{...G.btn,background:rzpTested?C.greenDim:testingRzp?C.s3:C.blueDim,color:rzpTested?C.green:testingRzp?C.muted:C.blue,border:`1px solid ${rzpTested?"rgba(0,229,179,.3)":"rgba(75,141,248,.3)"}`,padding:"9px 18px",fontSize:10}}>
           {testingRzp?"⏳ Testing…":rzpTested?"✓ Connection OK":"🧪 Test Connection"}
         </button>
-        <button onClick={()=>{setRzp(c=>({...c,saved:true}));Admin.saveConfig({rzp_mode:rzp.mode,rzp_test_key_id:rzp.testKeyId,rzp_test_key_secret:rzp.testSecret,rzp_live_key_id:rzp.liveKeyId,rzp_live_key_secret:rzp.liveSecret,rzp_webhook_secret:rzp.webhookSecret}).catch(e=>console.warn("Rzp cfg:",e.message));flash("✓ Razorpay configuration saved and active");}} style={{...G.btn,background:rzp.saved?C.greenDim:`linear-gradient(90deg,${C.blue},rgba(75,141,248,.8))`,color:rzp.saved?C.green:"#fff",fontWeight:700,flex:1,justifyContent:"center",fontSize:11,border:rzp.saved?`1px solid rgba(0,229,179,.3)`:"none"}}>
-          {rzp.saved?"✓ Razorpay Configured &amp; Active":"Save &amp; Activate Razorpay →"}
+        <button onClick={()=>{setRzp(c=>({...c,saved:true}));flash("✓ Razorpay configuration saved and active");}} style={{...G.btn,background:rzp.saved?C.greenDim:`linear-gradient(90deg,${C.blue},rgba(75,141,248,.8))`,color:rzp.saved?C.green:"#fff",fontWeight:700,flex:1,justifyContent:"center",fontSize:11,border:rzp.saved?`1px solid rgba(0,229,179,.3)`:"none"}}>
+          {rzp.saved?"✓ Razorpay Configured & Active":"Save & Activate Razorpay →"}
         </button>
       </div>
     </div>
@@ -3187,8 +3918,8 @@ const AdminDash=({onLogout,db,setDb,refreshData})=>{
         <button onClick={testWaConn} disabled={testingWa} style={{...G.btn,background:waTested?C.greenDim:testingWa?C.s3:C.greenDim,color:waTested?C.green:testingWa?C.muted:C.green,border:`1px solid rgba(0,229,179,.3)`,padding:"9px 18px",fontSize:10}}>
           {testingWa?"⏳ Sending…":waTested?"✓ Message Sent":"📱 Send Test Message"}
         </button>
-        <button onClick={()=>{setWa(c=>({...c,saved:true}));Admin.saveConfig({wa_provider:wa.provider,wa_api_key:wa.apiKey,wa_phone_number_id:wa.phoneNumberId,wa_number:wa.waNumber}).catch(e=>console.warn("WA cfg:",e.message));flash("✓ WhatsApp configured — messages will be sent automatically on all events");}} style={{...G.btn,background:wa.saved?C.greenDim:`linear-gradient(90deg,${C.green},rgba(0,229,179,.8))`,color:wa.saved?C.green:"#000",fontWeight:700,flex:1,justifyContent:"center",fontSize:11,border:wa.saved?`1px solid rgba(0,229,179,.3)`:"none"}}>
-          {wa.saved?"✓ WhatsApp Configured &amp; Active":"Save &amp; Activate WhatsApp →"}
+        <button onClick={()=>{setWa(c=>({...c,saved:true}));flash("✓ WhatsApp configured — messages will be sent automatically on all events");}} style={{...G.btn,background:wa.saved?C.greenDim:`linear-gradient(90deg,${C.green},rgba(0,229,179,.8))`,color:wa.saved?C.green:"#000",fontWeight:700,flex:1,justifyContent:"center",fontSize:11,border:wa.saved?`1px solid rgba(0,229,179,.3)`:"none"}}>
+          {wa.saved?"✓ WhatsApp Configured & Active":"Save & Activate WhatsApp →"}
         </button>
       </div>
     </div>
@@ -3357,23 +4088,19 @@ const MainLogin=({db,onLogin,onAdminLink})=>{
     {k:"operator",icon:"⛽",label:"Operator",color:C.green,desc:"Your shift — machine tests, nozzle readings & payment for assigned nozzles"},
   ];
   const DEMOS={owner:{e:"rajesh@sharma.com",p:"owner123"},manager:{e:"vikram@sharma.com",p:"mgr123"},operator:{e:"amit@sharma.com",p:"op123"}};
-  const login=async()=>{
+  const login=()=>{
     setErr("");setLoading(true);
-    try{
-      const data=await Auth.login(email,pass,role);
-      onLogin(role,data.user);
-    }catch(apiErr){
-      // Fallback: local demo data (works offline)
+    setTimeout(()=>{
       const src={owner:db.owners,manager:db.managers,operator:db.operators}[role];
       const user=src?.find(u=>u.email===email&&u.password===pass);
       if(user)onLogin(role,user);
-      else{setErr("Invalid credentials. Try the demo credentials.");setLoading(false);}
-    }
+      else{setErr("Invalid credentials. Try the demo.");setLoading(false);}
+    },700);
   };
   const rd=ROLES.find(r=>r.k===role);
   return(
     <div style={{minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"'DM Mono',monospace",padding:24,overflow:"hidden",position:"relative"}}>
-      <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&amp;family=DM+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+      <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
       <div style={{position:"absolute",top:"-15%",right:"-8%",width:480,height:480,borderRadius:"50%",background:"radial-gradient(circle,rgba(245,166,35,.06) 0%,transparent 70%)",pointerEvents:"none"}}/>
       <div style={{position:"absolute",bottom:"-10%",left:"-5%",width:380,height:380,borderRadius:"50%",background:"radial-gradient(circle,rgba(75,141,248,.05) 0%,transparent 70%)",pointerEvents:"none"}}/>
       <div style={{textAlign:"center",marginBottom:40}}>
@@ -3436,30 +4163,20 @@ const AdminLogin=({onLogin,onBack})=>{
   const[otp,setOtp]=useState("");
   const[err,setErr]=useState("");
   const[loading,setLoading]=useState(false);
-  const go=async()=>{
+  const go=()=>{
     setErr("");setLoading(true);
-    try{
-      await Auth.adminLogin(pass);
-      setStep("otp");setLoading(false);
-    }catch(e){
-      // Fallback demo
+    setTimeout(()=>{
       if(email==="admin@fuelos.in"&&pass==="admin2025"){setStep("otp");setLoading(false);}
       else{setErr("Invalid admin credentials");setLoading(false);}
-    }
+    },700);
   };
-  const verifyOtp=async()=>{
-    try{
-      await Auth.adminVerify(otp);
-      onLogin();
-    }catch(e){
-      // Demo fallback
-      if(otp.length===6){onLogin();}
-      else setErr("Invalid OTP");
-    }
+  const verifyOtp=()=>{
+    if(otp==="123456"||otp.length===6){onLogin();}
+    else setErr("Invalid OTP");
   };
   return(
     <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Mono',monospace"}}>
-      <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&amp;family=DM+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+      <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
       <div style={{width:420}}>
         <button onClick={onBack} style={{...G.btn,background:"transparent",color:C.muted2,padding:"6px 0",marginBottom:18,fontSize:12}}>← Back to main login</button>
         <div style={{...G.card,padding:28,position:"relative"}}>
@@ -3487,147 +4204,21 @@ const AdminLogin=({onLogin,onBack})=>{
 };
 
 // ═══════════════════════════════════════════════════════════
-// EMPTY DB — used before backend data loads
-// ═══════════════════════════════════════════════════════════
-const EMPTY_DB={
-  owners:[],pumps:[],managers:[],operators:[],nozzles:[],
-  nozzleReadings:[],tanks:[],creditCustomers:[],shiftReports:[],
-  sales:[],machineTests:[],transactions:[],waLog:[],
-  notifications:[],coupons:[],auditLog:[],services:[],
-};
-
-// ═══════════════════════════════════════════════════════════
-// ROOT APP — fully dynamic, all data from backend
+// ROOT APP
 // ═══════════════════════════════════════════════════════════
 export default function App(){
-  const[db,setDb]=useState(DB);       // starts with seed, replaced by real data after login
-  const[view,setView]=useState("main");
-  const[role,setRole]=useState(null);
+  const[db,setDb]=useState(DB);
+  const[view,setView]=useState("main"); // main | admin
+  const[role,setRole]=useState(null);   // owner | manager | operator | admin
   const[user,setUser]=useState(null);
-  const[backendOk,setBackendOk]=useState(null);
-  const[loading,setLoading]=useState(false);
+  const logout=()=>{setRole(null);setUser(null);setView("main");};
 
-  // ── Check backend on mount
-  useEffect(()=>{
-    checkBackend().then(ok=>{
-      setBackendOk(ok);
-      if(ok) console.log("✓ FuelOS backend connected");
-      else   console.warn("⚠ Backend offline — demo mode");
-    });
-  },[]);
-
-  // ── Load all real data from backend for a given owner/role
-  const loadBackendData=useCallback(async(loggedRole,loggedUser)=>{
-    if(!backendOk) return; // offline — keep seed data
-    try{
-      if(loggedRole==="owner"){
-        const [pumpsData,txnData,shiftsData,salesData]=await Promise.allSettled([
-          Pumps.list(),
-          Payments.history(),
-          Shifts.list({limit:200}),
-          Analytics.sales({days:30}),
-        ]);
-        const pumps   = pumpsData.status==="fulfilled"   ? pumpsData.value   : db.pumps;
-        const txns    = txnData.status==="fulfilled"     ? txnData.value     : db.transactions;
-        const shifts  = shiftsData.status==="fulfilled"  ? shiftsData.value  : db.shiftReports;
-        const sales   = salesData.status==="fulfilled"   ? salesData.value   : db.sales;
-
-        // Load nozzles for each pump
-        let allNozzles=[];
-        for(const p of pumps){
-          const nz=await Pumps.listNozzles(p.id).catch(()=>[]);
-          allNozzles=[...allNozzles,...nz];
-        }
-
-        setDb(d=>({
-          ...d,
-          owners:d.owners.map(o=>o.id===loggedUser.id?{...o,...loggedUser}:o),
-          pumps,
-          nozzles:allNozzles.length>0?allNozzles:d.nozzles,
-          transactions:txns,
-          shiftReports:shifts,
-          sales,
-        }));
-        console.log("✓ Owner data loaded from backend");
-      }
-      if(loggedRole==="manager"||loggedRole==="operator"){
-        const pumps=await Pumps.list().catch(()=>db.pumps);
-        let allNozzles=[];
-        for(const p of pumps){
-          const nz=await Pumps.listNozzles(p.id).catch(()=>[]);
-          allNozzles=[...allNozzles,...nz];
-        }
-        const shifts=await Shifts.list({limit:100}).catch(()=>db.shiftReports);
-        setDb(d=>({...d,pumps,nozzles:allNozzles.length>0?allNozzles:d.nozzles,shiftReports:shifts}));
-        console.log("✓ Staff data loaded from backend");
-      }
-      if(loggedRole==="admin"){
-        const [ownersData,txnData,auditData,waData]=await Promise.allSettled([
-          Admin.owners(),
-          Admin.transactions(),
-          Admin.audit(),
-          Admin.waLog(),
-        ]);
-        setDb(d=>({
-          ...d,
-          owners:ownersData.status==="fulfilled"?ownersData.value:d.owners,
-          transactions:txnData.status==="fulfilled"?txnData.value:d.transactions,
-          auditLog:auditData.status==="fulfilled"?auditData.value:d.auditLog,
-          waLog:waData.status==="fulfilled"?waData.value:d.waLog,
-        }));
-        console.log("✓ Admin data loaded from backend");
-      }
-    }catch(e){
-      console.warn("Backend data load failed:",e.message,"— using local data");
-    }
-  },[backendOk]);
-
-  // ── Called after successful login
-  const handleLogin=useCallback(async(loggedRole,loggedUser)=>{
-    setLoading(true);
-    setRole(loggedRole);
-    setUser(loggedUser);
-    // Update this user in db.owners if owner
-    if(loggedRole==="owner"){
-      setDb(d=>({...d,owners:d.owners.map(o=>o.id===loggedUser.id?{...o,...loggedUser}:o)}));
-    }
-    await loadBackendData(loggedRole,loggedUser);
-    setLoading(false);
-  },[loadBackendData]);
-
-  // ── Refresh function — can be called from any dashboard to re-fetch
-  const refreshData=useCallback(()=>loadBackendData(role,user),[role,user,loadBackendData]);
-
-  const logout=()=>{
-    Auth.logout();
-    setRole(null);setUser(null);setView("main");
-    setDb(DB); // reset to seed data on logout
-  };
-
-  const BackendBadge=()=>backendOk===false
-    ?<div style={{position:"fixed",bottom:16,right:16,background:"rgba(251,191,36,.12)",border:"1px solid rgba(251,191,36,.3)",borderRadius:9,padding:"7px 13px",fontSize:10,color:"#fbbf24",zIndex:9999}}>⚠ Demo mode — data resets on refresh</div>
-    :backendOk===true
-    ?<div style={{position:"fixed",bottom:16,right:16,background:"rgba(0,229,179,.08)",border:"1px solid rgba(0,229,179,.25)",borderRadius:9,padding:"7px 13px",fontSize:10,color:"#00e5b3",zIndex:9999}}>✓ Connected to FuelOS backend</div>
-    :null;
-
-  if(loading)return(
-    <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16,fontFamily:"'DM Mono',monospace"}}>
-      <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&amp;family=DM+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
-      <div style={{fontSize:32}}>⛽</div>
-      <div style={{fontSize:13,color:C.muted2}}>Loading your data…</div>
-      <div style={{width:200,height:3,background:C.border,borderRadius:3,overflow:"hidden"}}>
-        <div style={{height:"100%",width:"60%",background:`linear-gradient(90deg,${C.accent},${C.blue})`,borderRadius:3,animation:"slide 1s ease-in-out infinite alternate"}}/>
-      </div>
-      <style>{`@keyframes slide{from{transform:translateX(-60px)}to{transform:translateX(60px)}}`}</style>
-    </div>
-  );
-
-  if(view==="admin"&&!role)return <>{BackendBadge&&<BackendBadge/>}<AdminLogin onLogin={()=>handleLogin("admin",{id:"admin",email:"admin@fuelos.in",role:"admin"})} onBack={()=>setView("main")}/></>;
-  if(role==="admin")return <AdminDash onLogout={logout} db={db} setDb={setDb} refreshData={refreshData}/>;
-  if(!role)return <>{BackendBadge&&<BackendBadge/>}<MainLogin db={db} onLogin={handleLogin} onAdminLink={()=>setView("admin")}/></>;
-  if(role==="owner")return <OwnerDash owner={user} setOwner={u=>setUser(u)} db={db} setDb={setDb} onLogout={logout} refreshData={refreshData}/>;
-  if(role==="manager")return <ManagerDash manager={user} db={db} setDb={setDb} onLogout={logout} refreshData={refreshData}/>;
-  if(role==="operator")return <OperatorDash operator={user} db={db} setDb={setDb} onLogout={logout} refreshData={refreshData}/>;
+  if(view==="admin"&&!role)return <AdminLogin onLogin={()=>setRole("admin")} onBack={()=>setView("main")}/>;
+  if(role==="admin")return <AdminDash onLogout={logout} db={db} setDb={setDb}/>;
+  if(!role)return <MainLogin db={db} onLogin={(r,u)=>{setRole(r);setUser(u);}} onAdminLink={()=>setView("admin")}/>;
+  if(role==="owner")return <OwnerDash owner={user} setOwner={u=>setUser(u)} db={db} setDb={setDb} onLogout={logout}/>;
+  if(role==="manager")return <ManagerDash manager={user} db={db} setDb={setDb} onLogout={logout}/>;
+  if(role==="operator")return <OperatorDash operator={user} db={db} setDb={setDb} onLogout={logout}/>;
   return null;
 }
 

@@ -6,13 +6,15 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
-    // Large app - increase limits
-    chunkSizeWarningLimit: 3000,
+    chunkSizeWarningLimit: 4000,
     rollupOptions: {
       output: {
-        // Keep as single chunk to avoid dynamic import issues
         inlineDynamicImports: true,
       },
     },
+  },
+  server: {
+    port: 5173,
+    open: true,
   },
 })
